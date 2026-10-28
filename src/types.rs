@@ -489,12 +489,22 @@ macro_rules! decimal_type {
                 {
                     return Ok(special);
                 }
-                let (x, y) = (a.unpack(), b.unpack());
-                match kernel::add_sub::<$width>(x, y, subtract, dir) {
+                match kernel::add_sub::<$width>(a.unpack(), b.unpack(), subtract, dir) {
                     Ok(v) => Ok(Self(layout::$encode(v))),
-                    Err(Error::Overflow) => Self::overflow(sum_is_negative(x, y, subtract), dir),
+                    Err(Error::Overflow) => Self::add_sub_overflow(a, b, subtract, dir),
                     Err(e) => Err(e),
                 }
+            }
+
+            #[cold]
+            #[inline(never)]
+            fn add_sub_overflow(
+                a: impl Operand,
+                b: impl Operand,
+                subtract: bool,
+                dir: Option<Rounding>,
+            ) -> Result<Self, Error> {
+                Self::overflow(sum_is_negative(a.unpack(), b.unpack(), subtract), dir)
             }
 
             /// The result when an operand is an infinity or NaN; `None` for finite operands.
