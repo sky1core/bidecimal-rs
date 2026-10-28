@@ -1,4 +1,5 @@
 use core::cmp::Ordering;
+use core::hash::{Hash, Hasher};
 use core::num::FpCategory;
 use std::collections::{BTreeSet, HashMap};
 use std::format;
@@ -6,7 +7,7 @@ use std::string::String;
 use std::vec::Vec;
 
 use crate::refbid::{self, Classified, Finite, Format};
-use crate::test_support::{Rng, bounds, hash};
+use crate::test_support::{Rng, bounds, classes, hash};
 use crate::{Decimal32, Decimal64, Decimal128, Error, Operand, OrderedDecimal, Rounding};
 
 /// The observable class of a result.
@@ -1057,6 +1058,87 @@ fn ordered_decimal_keys_merge_nans_zeros_and_cohorts() {
     ordered_keys::<Decimal32>();
     ordered_keys::<Decimal64>();
     ordered_keys::<Decimal128>();
+}
+
+/// A hasher that keeps every byte written to it, so a test can compare hash
+/// inputs instead of hash values, which may collide.
+struct HashInput(Vec<u8>);
+impl Hasher for HashInput {
+    fn finish(&self) -> u64 {
+        0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
+}
+
+/// A key of `OrderedDecimal`, computed independently of the library: a finite
+/// value without trailing zeros, with `(false, 0, 0)` for every zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Key {
+    Finite(bool, u128, i32),
+    Infinity(bool),
+    Nan,
+}
+
+fn finite_key(v: Finite) -> Key {
+    if v.coeff == 0 {
+        return Key::Finite(false, 0, 0);
+    }
+    let (mut coeff, mut exp) = (v.coeff, v.exp);
+    while coeff % 10 == 0 {
+        coeff /= 10;
+        exp += 1;
+    }
+    Key::Finite(v.neg, coeff, exp)
+}
+
+fn hash_inputs<T: S>(by_key: &mut HashMap<Key, Vec<u8>>, by_input: &mut HashMap<Vec<u8>, Key>) {
+    let (p, lo, hi) = bounds(T::FORMAT);
+    let mut record = |key: Key, x: T| {
+        let mut state = HashInput(Vec::new());
+        OrderedDecimal(x).hash(&mut state);
+        let input = state.0;
+        assert_eq!(
+            by_key.entry(key).or_insert_with(|| input.clone()),
+            &input,
+            "{x:?}"
+        );
+        assert_eq!(*by_input.entry(input).or_insert(key), key, "{x:?}");
+    };
+    let mut values = classes(T::FORMAT, T::FORMAT);
+    let top = 1_u128 << 112;
+    for coeff in [top - 1, top, top + 1, top | 1 << 64, 10_u128.pow(p) - 1] {
+        if coeff < 10_u128.pow(p) {
+            for exp in [lo, 0, hi] {
+                for neg in [false, true] {
+                    values.push(Finite { neg, coeff, exp });
+                }
+            }
+        }
+    }
+    for v in values {
+        record(finite_key(v), fin::<T>(v.neg, v.coeff, v.exp));
+    }
+    for neg in [false, true] {
+        record(Key::Infinity(neg), T::of(inf_bits::<T>(neg)));
+        for (signaling, payload) in [
+            (false, 0),
+            (true, 0),
+            (false, 1),
+            (true, 10_u128.pow(p - 1) - 1),
+        ] {
+            record(Key::Nan, T::of(nan_bits::<T>(neg, signaling, payload)));
+        }
+    }
+}
+
+#[test]
+fn ordered_decimal_hash_inputs_separate_keys_across_widths() {
+    let (mut by_key, mut by_input) = (HashMap::new(), HashMap::new());
+    hash_inputs::<Decimal32>(&mut by_key, &mut by_input);
+    hash_inputs::<Decimal64>(&mut by_key, &mut by_input);
+    hash_inputs::<Decimal128>(&mut by_key, &mut by_input);
 }
 
 const SPELLINGS: [&str; 30] = [
