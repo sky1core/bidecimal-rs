@@ -7,7 +7,7 @@
 )]
 
 use core::cmp::Ordering;
-use core::hash::{Hash, Hasher};
+use core::hash::Hasher;
 use core::num::FpCategory;
 use core::ops::Neg;
 use core::{fmt, str::FromStr};
@@ -985,11 +985,13 @@ macro_rules! decimal_type {
 
             #[inline]
             fn key_hash<H: Hasher>(self, state: &mut H) {
-                if self.is_special() {
-                    crate::ordered::special_key(self.is_nan(), self.is_sign_negative()).hash(state);
+                let key = if self.is_special() {
+                    crate::ordered::special_hash_key(self.is_nan(), self.is_sign_negative())
                 } else {
-                    kernel::canonical(self.unpack()).hash(state);
-                }
+                    let (neg, coeff, exp) = kernel::canonical(self.unpack());
+                    crate::ordered::finite_hash_key(neg, coeff, exp)
+                };
+                state.write_u128(key);
             }
         }
 

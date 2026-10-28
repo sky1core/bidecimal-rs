@@ -141,13 +141,33 @@ pub(crate) fn cmp_keys<W: Width>(a: impl Sealed, b: impl Sealed) -> Ordering {
     }
 }
 
-/// The hashed form of an infinity or NaN key. A finite value with a zero
-/// coefficient has the canonical form `(false, 0, 0)`, so these forms, zero
-/// coefficients with extreme exponents, are never those of a finite value.
-pub(crate) fn special_key(nan: bool, neg: bool) -> (bool, u128, i32) {
+/// The offset that maps the exponent of a canonical finite key, in
+/// `-6176..=6144`, into `0..=12320`.
+const HASH_EXP_OFFSET: i32 = 6176;
+/// The packed exponent field of the infinities.
+const HASH_INFINITE: u128 = 0x3ffe;
+/// The packed exponent field of NaN.
+const HASH_NAN: u128 = 0x3fff;
+
+/// The hashed form of a canonical finite key: the sign in bit 127, the offset
+/// exponent in bits 113 to 126, and the coefficient, below `10^34 < 2^113`, in
+/// bits 0 to 112.
+#[inline]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "canonical exponents are in -6176..=6144, so the offset exponent is in 0..=12320"
+)]
+pub(crate) fn finite_hash_key(neg: bool, coeff: u128, exp: i32) -> u128 {
+    (u128::from(neg) << 127) | (((exp + HASH_EXP_OFFSET) as u128) << 113) | coeff
+}
+
+/// The hashed form of an infinity or NaN key, with an exponent field that no
+/// finite key has.
+#[inline]
+pub(crate) fn special_hash_key(nan: bool, neg: bool) -> u128 {
     if nan {
-        (false, 0, i32::MIN)
+        HASH_NAN << 113
     } else {
-        (neg, 0, i32::MAX)
+        (u128::from(neg) << 127) | (HASH_INFINITE << 113)
     }
 }

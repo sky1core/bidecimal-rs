@@ -542,7 +542,12 @@ pub(crate) fn canonical(value: Unpacked) -> (bool, u128, i32) {
     if value.coeff == 0 {
         return (false, 0, 0);
     }
-    let (coeff, zeros) = strip_trailing_zeros(value.coeff);
+    let (coeff, zeros) = if value.coeff < 10_000_000_000_000_000 {
+        let (coeff, zeros) = strip_trailing_zeros_64(value.coeff as u64);
+        (u128::from(coeff), zeros)
+    } else {
+        strip_trailing_zeros(value.coeff)
+    };
     (value.neg, coeff, value.exp + zeros as i32)
 }
 
