@@ -1,0 +1,10 @@
+*.md
+!README.md
+!docs/SPEC.md
+!docs/VERIFICATION.md
+
+.*
+!.gitignore
+!.github/
+
+/target

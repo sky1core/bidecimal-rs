@@ -1,0 +1,35 @@
+[package]
+name = "rust-decimal-comparison"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+bidecimal = { path = ".." }
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+num-bigint = "=0.5.1"
+rust_decimal = "=1.43.0"
+
+[profile.test]
+opt-level = 3
+overflow-checks = true
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+debug = false
+
+[profile.bench]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+debug = false
+
+[[bench]]
+name = "paths"
+harness = false

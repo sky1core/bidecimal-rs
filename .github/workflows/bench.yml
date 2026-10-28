@@ -1,0 +1,132 @@
+name: Benchmark
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "benches/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "scripts/bench-ab.py"
+      - "bench-instructions/**"
+      - ".github/workflows/bench.yml"
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Base commit
+        required: true
+      candidate:
+        description: Candidate commit
+        required: true
+      rounds:
+        description: Runs per side
+        default: "2"
+      benches:
+        description: Criterion targets, separated by spaces
+        default: finite keys special ops
+
+permissions:
+  contents: read
+
+env:
+  BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base }}
+  CANDIDATE: ${{ github.event_name == 'pull_request' && github.sha || inputs.candidate }}
+
+concurrency:
+  group: bench-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  times:
+    if: github.event.repository.private == false
+    name: Times (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup component add llvm-tools
+      - name: Compare
+        env:
+          ROUNDS: ${{ github.event_name == 'pull_request' && '2' || inputs.rounds }}
+          BENCHES: ${{ github.event_name == 'pull_request' && 'ops finite' || inputs.benches }}
+        run: |
+          targets=()
+          for target in $BENCHES; do targets+=(--bench "$target"); done
+          if [ ${#targets[@]} -eq 0 ]; then echo "No benchmark targets given." >&2; exit 1; fi
+          python3 scripts/bench-ab.py --base "$BASE" --candidate "$CANDIDATE" "${targets[@]}" \
+            --rounds "$ROUNDS" --analyze-codegen --work "$RUNNER_TEMP/bench-trees" --out bench-out
+      - name: Summary
+        if: always()
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p bench-out
+          echo "Runner image ${ImageOS:-not set} ${ImageVersion:-not set}; pull request head \`${HEAD_SHA:-none}\`." > bench-out/runner.md
+          cat bench-out/runner.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -f bench-out/summary.md ]; then
+            cat bench-out/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No summary: the comparison did not finish." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-${{ matrix.os }}
+          path: bench-out
+
+  instructions:
+    if: github.event.repository.private == false
+    name: Instructions (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Install Valgrind and the Gungraun runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends valgrind libc6-dbg libclang-dev
+          cargo install gungraun-runner --version 0.20.0 --locked
+      - name: Compare
+        run: >-
+          python3 scripts/bench-ab.py --bench instructions --base "$BASE"
+          --candidate "$CANDIDATE" --work "$RUNNER_TEMP/bench-trees" --out bench-out
+      - name: Summary
+        if: always()
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p bench-out
+          echo "Runner image ${ImageOS:-not set} ${ImageVersion:-not set}; pull request head \`${HEAD_SHA:-none}\`." > bench-out/runner.md
+          cat bench-out/runner.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -f bench-out/summary.md ]; then
+            cat bench-out/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No summary: the comparison did not finish." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: instructions-${{ matrix.os }}
+          path: bench-out

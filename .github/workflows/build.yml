@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.event.repository.private == false
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Docs
+        run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    if: github.event.repository.private == false
+    name: Test (Rust 1.98)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust 1.98
+        run: rustup toolchain install 1.98 --profile minimal
+      - name: Test
+        run: cargo +1.98 test --locked
+
+  no-std:
+    if: github.event.repository.private == false
+    name: no_std build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup target add x86_64-unknown-none
+      - name: Build for a bare-metal target
+        run: cargo build --release --lib --locked --target x86_64-unknown-none

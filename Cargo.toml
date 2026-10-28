@@ -1,0 +1,60 @@
+[package]
+name = "bidecimal"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Fixed-width IEEE 754-2019 decimal types with exact or explicitly rounded results"
+license = "MIT OR Apache-2.0"
+publish = false
+repository = "https://github.com/sky1core/bidecimal-rs"
+keywords = ["decimal", "ieee754", "bid", "no-std", "fixed-width"]
+categories = ["mathematics", "no-std::no-alloc"]
+include = ["/src", "/LICENSE-APACHE", "/LICENSE-MIT", "/README.md"]
+
+[workspace]
+members = ["bench-instructions"]
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+num-bigint = "=0.5.1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(verus_keep_ghost)"] }
+
+[profile.test]
+opt-level = 3
+overflow-checks = true
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+debug = false
+
+[profile.bench]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+debug = false
+
+[profile.bench-instructions]
+inherits = "bench"
+debug = true
+
+[[bench]]
+name = "keys"
+harness = false
+
+[[bench]]
+name = "special"
+harness = false
+
+[[bench]]
+name = "finite"
+harness = false
+
+[[bench]]
+name = "ops"
+harness = false
