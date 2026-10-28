@@ -79,9 +79,12 @@ unequal and unordered; infinities bracket finite values. `total_cmp` also
 uses class, sign, finite cohort exponent, NaN signaling bit and payload.
 `src/ordered.rs` instead orders keys as -infinity < finite < +infinity < NaN,
 merging all NaNs and numerically equal finite values, including signed zeros.
-Only `OrderedDecimal` provides `Eq`, `Ord` and `Hash`. Finite keys hash the
-normalized `(bool,u128,i32)` tuple below; NaNs hash `(false,0,i32::MIN)` and
-infinities `(neg,0,i32::MAX)`, disjoint from finite zero's `(false,0,0)`.
+Only `OrderedDecimal` provides `Eq`, `Ord` and `Hash`. Each key is hashed as
+one `u128` written once. A finite key packs the normalized `(bool,u128,i32)`
+form below: the sign in bit 127, the exponent plus 6176 in bits 113 to 126,
+and the coefficient in bits 0 to 112. Every NaN hashes `0x3fff << 113`, with
+the sign and coefficient bits zero, and an infinity `(neg << 127) |
+(0x3ffe << 113)`; no finite key has these exponent fields.
 
 The following are all tests in `src/special_tests.rs`. Unless a row names
 particular widths, it checks each width separately. The shared sample set
@@ -1062,9 +1065,13 @@ to the exponent. The coefficient is below `10^34 < 2^127`; at most 33 additions
 to an exponent in `-6176..=6111` fit `i32`. Uniqueness follows because two
 integers indivisible by ten cannot differ by a nontrivial power of ten.
 A finite zero key is always `(false,0,0)`. All widths of `OrderedDecimal`
-hash finite keys as the same tuple of types `(bool,u128,i32)`, so numeric
-equality implies identical hash input, including
-across widths.
+hash a finite key as the same packed `u128`: the sign in bit 127, the
+exponent plus 6176 in bits 113 to 126, and the coefficient in bits 0 to 112.
+Normalized exponents are in `-6176..=6144`, so the offset exponent is in
+`0..=12320`, below `2^14`, and the coefficient is below `10^34 < 2^113`. The
+fields do not overlap, so distinct normalized keys pack differently and
+numeric equality implies identical hash input, including across widths. The
+NaN and infinity exponent fields `0x3fff` and `0x3ffe` are above `12320`.
 
 ### String parsing
 
