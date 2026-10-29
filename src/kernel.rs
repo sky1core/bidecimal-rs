@@ -508,8 +508,30 @@ pub(crate) fn cmp<W: Width>(a: Unpacked, b: Unpacked) -> Ordering {
     cmp_general(a, b)
 }
 
-#[inline(never)]
+#[inline]
 fn cmp_general(a: Unpacked, b: Unpacked) -> Ordering {
+    cmp_general_parts(a.neg, a.coeff, a.exp, b.neg, b.coeff, b.exp)
+}
+
+#[inline(never)]
+fn cmp_general_parts(
+    a_neg: bool,
+    a_coeff: u128,
+    a_exp: i32,
+    b_neg: bool,
+    b_coeff: u128,
+    b_exp: i32,
+) -> Ordering {
+    let a = Unpacked {
+        neg: a_neg,
+        coeff: a_coeff,
+        exp: a_exp,
+    };
+    let b = Unpacked {
+        neg: b_neg,
+        coeff: b_coeff,
+        exp: b_exp,
+    };
     let a_neg = a.neg && a.coeff != 0;
     let b_neg = b.neg && b.coeff != 0;
     match a_neg.cmp(&b_neg) {
