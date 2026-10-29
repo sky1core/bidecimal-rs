@@ -995,13 +995,11 @@ macro_rules! decimal_type {
 
             #[inline]
             fn key_hash<H: Hasher>(self, state: &mut H) {
-                let key = if self.is_special() {
-                    crate::ordered::special_hash_key(self.is_nan(), self.is_sign_negative())
-                } else {
-                    let (neg, coeff, exp) = kernel::canonical(self.unpack());
-                    crate::ordered::finite_hash_key(neg, coeff, exp)
-                };
-                state.write_u128(key);
+                if self.is_zero() {
+                    state.write_u128(crate::ordered::finite_hash_key(false, 0, 0));
+                    return;
+                }
+                state.write_u128(self.canonical_hash_key());
             }
         }
 
@@ -1014,6 +1012,16 @@ macro_rules! decimal_type {
         }
 
         impl $name {
+            #[inline(never)]
+            fn canonical_hash_key(self) -> u128 {
+                if self.is_special() {
+                    crate::ordered::special_hash_key(self.is_nan(), self.is_sign_negative())
+                } else {
+                    let (neg, coeff, exp) = kernel::canonical(self.unpack());
+                    crate::ordered::finite_hash_key(neg, coeff, exp)
+                }
+            }
+
             #[inline]
             fn finite_eq(self, other: Self) -> bool {
                 kernel::eq::<$width>(self.comparison_parts(), other.comparison_parts())

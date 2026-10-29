@@ -560,6 +560,7 @@ fn cmp_general_parts(
             &&& ret.1 % 10 != 0
         },
 ))]
+#[inline(always)]
 pub(crate) fn canonical(value: Unpacked) -> (bool, u128, i32) {
     if value.coeff == 0 {
         return (false, 0, 0);
