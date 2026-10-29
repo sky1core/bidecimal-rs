@@ -106,7 +106,7 @@ and checks canonical special bits.
 | `cross_width_comparisons_with_specials` | Decimal32 NaN versus Decimal64 one in both orders, infinities versus finite Decimal128 extrema, same/opposite infinity signs across widths, and Decimal128 NaN versus itself: equality and partial-order results. |
 | `total_cmp_is_the_ieee_total_order` | Sample values, 200 seeded finite values per width, signed cohorts, extreme zeros and NaNs of both kinds with payloads 0/7/9: all pairs checked against an independent integer/cohort/NaN order, reversal, and adjacent order after sorting. |
 | `ordered_decimal_keys_merge_nans_zeros_and_cohorts` | Five NaN variants, five signed zero cohorts, every representable cohort of one and a ten-value order ladder: key equality/order/hash agreement, max, BTreeSet and HashMap insertion/lookup/removal, wrapper size/alignment, formatting and accessors. |
-| `ordered_decimal_hash_inputs_separate_keys_across_widths` | Every finite coefficient/exponent/sign class of each width, Decimal128 coefficients `2^112-1`, `2^112`, `2^112+1`, `2^112+2^64` and the largest coefficient of each width at qmin, 0 and qmax, both infinities, and NaNs of both signs, quiet with payloads 0 and 1 and signaling with payloads 0 and the maximum: the bytes written to the hasher, compared across all three widths, are equal exactly when the independently computed keys are equal. |
+| `ordered_decimal_hash_inputs_separate_keys_across_widths` | Every finite coefficient/exponent/sign class of each width, odd coefficients and even coefficients ending in 2/4/6/8 on both sides of `10^16`, Decimal128 coefficients `10^16-1`, `10^16`, `10^16+1`, `2^64-1`, `2^64`, `2^64+1`, `2^112-1`, `2^112`, `2^112+1`, `2^112+2^64` and the largest coefficient of each width at qmin, 0 and qmax, both infinities, and NaNs of both signs, quiet with payloads 0 and 1 and signaling with payloads 0 and the maximum: the bytes written to the hasher, compared across all three widths, are equal exactly when the independently computed keys are equal. |
 | `special_spellings_parse_like_f64` | 30 fixed signed/case-varied special spellings and malformed strings: acceptance agrees with f64; accepted results check class/sign, quiet zero-payload NaNs, and bit agreement with toward-negative parsing and FromStr. |
 | `special_values_format_like_f64` | Parsed +/-NaN and +/-infinity under 17 Display/Debug flag combinations, plus plain/padded stripped output, agree with f64; a negative signaling NaN with payload 3 displays/debugs as `NaN`. |
 | `special_constants_and_negation` | Decimal32 NAN/NEG_INFINITY, Decimal64 NAN/INFINITY/NEG_INFINITY/MIN and Decimal128 INFINITY: constant fields, negation, abs and copysign results, three explicit special encodings, and negative-infinity text. |
@@ -512,13 +512,15 @@ with production constants; their trust boundary is stated above.
 
 ### Removing trailing zeros
 
-Domain: `0 <= c < 2^127`. Zero returns `(0,0)`. A nonzero input has at most
+Domain: `0 <= c < 2^127`. Zero returns `(0,0)`. Odd inputs return `(c,0)`
+because no odd integer is divisible by ten. Other nonzero inputs have at most
 38 trailing zeros. Greedy exact division at powers `32,16,8,4,2,1` recovers the
 binary expansion of that count: after each decision, the remaining count is
 smaller than the power just considered. Each division decreases the input,
 preserving the division premise. The total removed count is at most 38.
 `strip_trailing_zeros_matches_naive_for_every_power` checks all possible counts
-and coefficients on decimal and integer boundaries.
+and odd/even coefficients on decimal and integer boundaries, including both
+sides of `10^16`, plus 1,000 fixed-seed random multiples per power.
 
 ### 64-bit digit count, division and stripping
 
@@ -556,7 +558,8 @@ other branches. The optional `reciprocal_64_k01` through
 integer model with current production constants under the trust boundary
 stated above.
 
-Stripping: domain `0<=c<10^16`. Zero returns `(0,0)`. A nonzero input has at
+Stripping: domain `0<=c<10^16`. Zero returns `(0,0)`. Odd inputs return `(c,0)`
+because no odd integer is divisible by ten. Other nonzero inputs have at
 most 15 trailing zeros. Greedy exact division by the constants `10^8,10^4,10^2,10`
 recovers the binary expansion of that count; each accepted division
 decreases the input, and native division by a nonzero constant is exact.
@@ -1010,8 +1013,9 @@ small-coefficient encoding with `c<10^34`: finite constructors take bits
 accepted by the finite decoder or encode fields with `c<10^34` and
 `qmin<=q<=qmax`; sign operations change only the sign bit of stored bits.
 Decimal32 and Decimal64 comparison handle both finite coefficient forms.
-`OrderedDecimal` hashing uses general unpacking for finite values, which
-extracts identical fields on this domain.
+`OrderedDecimal` hashing extracts finite Decimal128 fields with the same
+canonical-BID extraction as comparison; smaller widths use general unpacking.
+Both extract identical fields on this domain.
 
 Domain: two unpacked finite values of any supported widths. Let `P` be
 the greater operand precision, one of 7, 16, 34, fixed at each call site.
@@ -1062,8 +1066,10 @@ Thus this predicate is equivalent to ordering returning Equal on its entire
 domain, for every width combination, cohort and signed zero.
 
 For nonzero finite keys, remove every trailing decimal zero and add its count
-to the exponent. The coefficient is below `10^34 < 2^127`; at most 33 additions
-to an exponent in `-6176..=6111` fit `i32`. Uniqueness follows because two
+to the exponent. Coefficients below `10^16` use the 64-bit stripping routine;
+larger coefficients use the 128-bit routine in a separate hash-key function.
+Both stripping routines return odd coefficients unchanged. The coefficient is
+below `10^34 < 2^127`; at most 33 additions to an exponent in `-6176..=6111` fit `i32`. Uniqueness follows because two
 integers indivisible by ten cannot differ by a nontrivial power of ten.
 A finite zero key is always `(false,0,0)`. All widths of `OrderedDecimal`
 hash a finite key as the same packed `u128`: the sign in bit 127, the

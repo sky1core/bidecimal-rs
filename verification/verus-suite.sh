@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERUS_VERSION=0.2026.10.18.7d82994
-EXPECTED_VERIFIED=316
+EXPECTED_VERIFIED=318
 
 functions=(
     bidecimal::error::Error::clone

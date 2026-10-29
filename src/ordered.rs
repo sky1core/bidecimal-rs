@@ -171,3 +171,13 @@ pub(crate) fn special_hash_key(nan: bool, neg: bool) -> u128 {
         (u128::from(neg) << 127) | (HASH_INFINITE << 113)
     }
 }
+
+#[inline(never)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "decoded coeff < 10^34, so at most 33 zeros are added to an i32 exponent in -6176..=6111"
+)]
+pub(crate) fn canonical_wide_hash_key(neg: bool, coeff: u128, exp: i32) -> u128 {
+    let (coeff, zeros) = kernel::strip_trailing_zeros(coeff);
+    finite_hash_key(neg, coeff, exp + zeros as i32)
+}

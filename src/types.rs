@@ -1017,7 +1017,19 @@ macro_rules! decimal_type {
                 if self.is_special() {
                     crate::ordered::special_hash_key(self.is_nan(), self.is_sign_negative())
                 } else {
-                    let (neg, coeff, exp) = kernel::canonical(self.unpack());
+                    let value = if Self::DIGITS > 16 {
+                        self.comparison_parts()
+                    } else {
+                        self.unpack()
+                    };
+                    if Self::DIGITS > 16 && value.coeff >= 10_000_000_000_000_000 {
+                        return crate::ordered::canonical_wide_hash_key(
+                            value.neg,
+                            value.coeff,
+                            value.exp,
+                        );
+                    }
+                    let (neg, coeff, exp) = kernel::canonical(value);
                     crate::ordered::finite_hash_key(neg, coeff, exp)
                 }
             }

@@ -67,6 +67,7 @@ pub(crate) fn div_rem_pow10(x: u128, k: u32) -> (u128, u128) {
     (q, x - q * pow10(k))
 }
 
+#[inline]
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "callers pass coeff < 2^127, which has at most 38 trailing decimal zeros; each exact division decreases coeff and zeros never exceeds 38"
@@ -81,8 +82,16 @@ pub(crate) fn div_rem_pow10(x: u128, k: u32) -> (u128, u128) {
         ret.1 <= 38,
 ))]
 pub(crate) fn strip_trailing_zeros(mut coeff: u128) -> (u128, u32) {
-    if coeff == 0 {
-        return (0, 0);
+    if coeff == 0 || coeff & 1 != 0 {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            vstd::arithmetic::power::lemma_pow0(10);
+            if coeff != 0 {
+                assert(coeff & 1u128 == coeff % 2u128) by (bit_vector);
+                vstd::arithmetic::div_mod::lemma_mod_breakdown(coeff as int, 5, 2);
+            }
+        }
+        return (coeff, 0);
     }
     #[cfg(verus_keep_ghost)]
     proof_decl! {
@@ -185,8 +194,16 @@ pub(crate) fn div_rem_pow10_64(x: u64, k: u32) -> (u64, u64) {
         ret.1 <= 15,
 ))]
 pub(crate) fn strip_trailing_zeros_64(mut coeff: u64) -> (u64, u32) {
-    if coeff == 0 {
-        return (0, 0);
+    if coeff == 0 || coeff & 1 != 0 {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            vstd::arithmetic::power::lemma_pow0(10);
+            if coeff != 0 {
+                assert(coeff & 1u64 == coeff % 2u64) by (bit_vector);
+                vstd::arithmetic::div_mod::lemma_mod_breakdown(coeff as int, 5, 2);
+            }
+        }
+        return (coeff, 0);
     }
     #[cfg(verus_keep_ghost)]
     proof_decl! {

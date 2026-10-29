@@ -1108,7 +1108,32 @@ fn hash_inputs<T: S>(by_key: &mut HashMap<Key, Vec<u8>>, by_input: &mut HashMap<
     };
     let mut values = classes(T::FORMAT, T::FORMAT);
     let top = 1_u128 << 112;
-    for coeff in [top - 1, top, top + 1, top | 1 << 64, 10_u128.pow(p) - 1] {
+    for coeff in [
+        11,
+        12,
+        14,
+        16,
+        18,
+        10_u128.pow(16) - 8,
+        10_u128.pow(16) - 6,
+        10_u128.pow(16) - 4,
+        10_u128.pow(16) - 2,
+        10_u128.pow(16) - 1,
+        10_u128.pow(16),
+        10_u128.pow(16) + 1,
+        10_u128.pow(16) + 2,
+        10_u128.pow(16) + 4,
+        10_u128.pow(16) + 6,
+        10_u128.pow(16) + 8,
+        u128::from(u64::MAX),
+        u128::from(u64::MAX) + 1,
+        u128::from(u64::MAX) + 2,
+        top - 1,
+        top,
+        top + 1,
+        top | 1 << 64,
+        10_u128.pow(p) - 1,
+    ] {
         if coeff < 10_u128.pow(p) {
             for exp in [lo, 0, hi] {
                 for neg in [false, true] {

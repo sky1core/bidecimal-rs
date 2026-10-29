@@ -107,6 +107,7 @@ fn naive_strip_trailing_zeros(mut coeff: u128) -> (u128, u32) {
 
 #[test]
 fn strip_trailing_zeros_matches_naive_for_every_power() {
+    let mut rng = Rng(0x1319_8a2e_0370_7344);
     for k in 0..=38 {
         for coeff in [
             0,
@@ -122,6 +123,21 @@ fn strip_trailing_zeros_matches_naive_for_every_power() {
             100,
             125,
             1200,
+            12,
+            14,
+            16,
+            18,
+            10_u128.pow(16) - 8,
+            10_u128.pow(16) - 6,
+            10_u128.pow(16) - 4,
+            10_u128.pow(16) - 2,
+            10_u128.pow(16) - 1,
+            10_u128.pow(16),
+            10_u128.pow(16) + 1,
+            10_u128.pow(16) + 2,
+            10_u128.pow(16) + 4,
+            10_u128.pow(16) + 6,
+            10_u128.pow(16) + 8,
             123_456_789,
             10_u128.pow(34) - 1,
             LIMIT - 1,
@@ -135,6 +151,16 @@ fn strip_trailing_zeros_matches_naive_for_every_power() {
                     "coeff={coeff}, k={k}"
                 );
             }
+        }
+        let scale = 10_u128.pow(k);
+        let top = (LIMIT - 1) / scale;
+        for _ in 0..1000 {
+            let x = (1 + rng.next_u128() % top) * scale;
+            assert_eq!(
+                strip_trailing_zeros(x),
+                naive_strip_trailing_zeros(x),
+                "x={x}"
+            );
         }
     }
 }
