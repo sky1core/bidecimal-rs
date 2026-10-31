@@ -628,9 +628,29 @@ const ALLOWED_CARGO_VARIABLES: [&str; 8] = [
     "CARGO_CACHE_AUTO_CLEAN_FREQUENCY",
     "CARGO_FUTURE_INCOMPAT_REPORT_FREQUENCY",
 ];
-const ALLOWED_CARGO_PREFIXES: [&str; 3] = ["CARGO_TERM_", "CARGO_HTTP_", "CARGO_NET_"];
+const ALLOWED_CARGO_PREFIXES: [&str; 7] = [
+    "CARGO_TERM_",
+    "CARGO_HTTP_",
+    "CARGO_NET_",
+    "CARGO_ALIAS_",
+    "CARGO_CREDENTIAL_ALIAS_",
+    "CARGO_REGISTRY_",
+    "CARGO_REGISTRIES_",
+];
 const DIRECTORY_CONFIGS: [&str; 2] = [".cargo/config.toml", ".cargo/config"];
 const HOME_CONFIGS: [&str; 2] = ["config.toml", "config"];
+const ALLOWED_CONFIG_TABLES: [&str; 9] = [
+    "alias",
+    "cache",
+    "credential-alias",
+    "future-incompat-report",
+    "http",
+    "net",
+    "registries",
+    "registry",
+    "term",
+];
+const ALLOWED_CONFIG_BUILD_KEYS: [&str; 2] = ["build-dir", "target-dir"];
 
 fn rejected_variable(key: &str) -> bool {
     REJECTED_VARIABLES.contains(&key)
@@ -676,10 +696,74 @@ fn verify_build_variables(variables: impl IntoIterator<Item = std::ffi::OsString
     Ok(())
 }
 
-fn verify_configs_absent(candidates: &[PathBuf]) -> Result<()> {
+fn bare_segments(key: &str) -> Vec<&str> {
+    key.split('.')
+        .map(str::trim)
+        .take_while(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+        .collect()
+}
+
+fn allowed_config_path(path: &[&str]) -> bool {
+    match path {
+        [table, ..] if ALLOWED_CONFIG_TABLES.contains(table) => true,
+        ["build", key, ..] => ALLOWED_CONFIG_BUILD_KEYS.contains(key),
+        _ => false,
+    }
+}
+
+fn rejected_config_line(text: &str) -> Option<(usize, &str)> {
+    let mut table = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let allowed = if line.contains("\"\"\"") || line.contains("'''") || line.starts_with("[[") {
+            false
+        } else if let Some(header) = line.strip_prefix('[') {
+            match header.split_once(']') {
+                Some((name, _)) => {
+                    table = bare_segments(name);
+                    allowed_config_path(&table) || name.trim() == "build"
+                }
+                None => false,
+            }
+        } else if let Some((key, _)) = line.split_once('=') {
+            allowed_config_path(&[table.as_slice(), bare_segments(key).as_slice()].concat())
+        } else {
+            false
+        };
+        if !allowed {
+            return Some((index + 1, line));
+        }
+    }
+    None
+}
+
+fn verify_configs(candidates: &[PathBuf]) -> Result<()> {
     for config in candidates {
-        if config.try_exists()? {
-            return Err(format!("Cargo configuration must be absent: {}", config.display()).into());
+        let text = match fs::read_to_string(config) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "cannot read Cargo configuration {}: {error}",
+                    config.display()
+                )
+                .into());
+            }
+        };
+        if let Some((number, line)) = rejected_config_line(&text) {
+            return Err(format!(
+                "Cargo configuration {} line {number} sets a build setting or cannot be checked: {line}",
+                config.display()
+            )
+            .into());
         }
     }
     Ok(())
@@ -689,7 +773,7 @@ fn check_build_environment() -> Result<()> {
     let cwd = env::current_dir()?;
     let home = cargo_home(&cwd, env::var_os("CARGO_HOME"), env::home_dir())?;
     verify_build_variables(env::vars_os().map(|(key, _)| key))?;
-    verify_configs_absent(&cargo_config_candidates(&cwd, &home)?)
+    verify_configs(&cargo_config_candidates(&cwd, &home)?)
 }
 
 fn build_check_rows(host: &str) -> String {
@@ -698,12 +782,16 @@ fn build_check_rows(host: &str) -> String {
         .map(|prefix| format!("{prefix}*"))
         .collect();
     format!(
-        "| Target | {host} (host of the pinned rustc: the benchmark build passes no --target, CARGO_BUILD_TARGET is absent and no Cargo configuration file exists) |\n| Build environment variables | absent: {}, and every CARGO_* variable except {}, {} |\n| Cargo configuration files | absent: {} in the working directory and every ancestor directory; {} in the Cargo home |\n",
+        "| Target | {host} (host of the pinned rustc: the benchmark build passes no --target, CARGO_BUILD_TARGET is absent and no Cargo configuration file sets a target) |\n| Build environment variables | absent: {}, and every CARGO_* variable except {}, {} |\n| Cargo configuration files | {} in the working directory and every ancestor directory and {} in the Cargo home set nothing but {} and the {} tables |\n",
         REJECTED_VARIABLES.join(", "),
         ALLOWED_CARGO_VARIABLES.join(", "),
         prefixes.join(", "),
         DIRECTORY_CONFIGS.join(", "),
         HOME_CONFIGS.join(", "),
+        ALLOWED_CONFIG_BUILD_KEYS
+            .map(|key| format!("build.{key}"))
+            .join(", "),
+        ALLOWED_CONFIG_TABLES.join(", "),
     )
 }
 
@@ -1410,8 +1498,6 @@ mod tests {
             "CARGO_PROFILE_BENCH_LTO",
             "CARGO_PROFILE_BENCH_FAT_LTO_CODEGEN_UNITS",
             "CARGO_PROFILE_BENCH_BUILD_OVERRIDE_OPT_LEVEL",
-            "CARGO_ALIAS_BENCH",
-            "CARGO_REGISTRIES_CRATES_IO_PROTOCOL",
             "CARGO_RESOLVER_LOCKFILE_PATH",
             "CARGO_UNSTABLE_BUILD_STD",
         ]) {
@@ -1431,13 +1517,17 @@ mod tests {
             "CARGO_TERM_COLOR",
             "CARGO_HTTP_TIMEOUT",
             "CARGO_NET_OFFLINE",
+            "CARGO_ALIAS_BENCH",
+            "CARGO_CREDENTIAL_ALIAS_X",
+            "CARGO_REGISTRY_TOKEN",
+            "CARGO_REGISTRIES_CRATES_IO_PROTOCOL",
         ]) {
             verify_build_variables(vec![key.into()]).unwrap();
         }
     }
 
     #[test]
-    fn refuses_cargo_configuration_files() {
+    fn checks_cargo_configuration_files() {
         let root = env::current_dir()
             .unwrap()
             .join(format!("target/perf-env-fixture-{}", std::process::id()));
@@ -1455,7 +1545,15 @@ mod tests {
             assert_eq!(candidates.len(), 10);
             candidates
         };
-        verify_configs_absent(&candidates_inside(&root.join("clean"))).unwrap();
+        let clean = root.join("clean");
+        let candidates = candidates_inside(&clean);
+        verify_configs(&candidates).unwrap();
+        fs::write(
+            clean.join("home/config.toml"),
+            "[build]\nbuild-dir = \"/cache\"\n",
+        )
+        .unwrap();
+        verify_configs(&candidates).unwrap();
         let cases = [
             ("work/a/b/.cargo/config.toml", "working directory"),
             ("work/a/b/.cargo/config", "working directory"),
@@ -1470,15 +1568,75 @@ mod tests {
             let candidates = candidates_inside(&case);
             let file = case.join(config);
             fs::create_dir_all(file.parent().unwrap()).unwrap();
-            fs::write(&file, "").unwrap();
+            fs::write(&file, "[profile.bench]\nlto = \"fat\"\n").unwrap();
             assert_eq!(
-                verify_configs_absent(&candidates).unwrap_err().to_string(),
-                format!("Cargo configuration must be absent: {}", file.display()),
+                verify_configs(&candidates).unwrap_err().to_string(),
+                format!(
+                    "Cargo configuration {} line 1 sets a build setting or cannot be checked: [profile.bench]",
+                    file.display()
+                ),
                 "{place}: {config}"
             );
         }
         drop(_fixture);
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn reads_cargo_configuration_settings() {
+        for text in [
+            "",
+            "# comment\n\n[build]\nbuild-dir = \"/cache/{workspace-path-hash}\"\ntarget-dir = \"/target\"\n",
+            "build.build-dir = \"/cache\"\n[net]\nretry = 3\n[term]\ncolor = \"never\"\n[http]\ntimeout = 30\n",
+            "[cache]\nauto-clean-frequency = \"never\"\n[future-incompat-report]\nfrequency = \"never\"\n",
+            "net.retry = 3\n[net.ssh]\nknown-hosts = [\"a\"]\n",
+            "[alias]\nb = \"build\"\n[registries.crates-io]\nprotocol = \"sparse\"\n[registry]\ndefault = \"crates-io\"\n",
+            "[credential-alias]\nx = \"cargo:token\"\n[ build ]\nbuild-dir = \"/cache\"\n[net.\"x\"]\ny = 1\n",
+        ] {
+            assert_eq!(rejected_config_line(text), None, "{text}");
+        }
+        for (text, rejected) in [
+            ("[profile.bench]\nlto = \"fat\"\n", (1, "[profile.bench]")),
+            (
+                "[build]\nbuild-dir = \"/cache\"\nrustflags = [\"-Ctarget-cpu=native\"]\n",
+                (3, "rustflags = [\"-Ctarget-cpu=native\"]"),
+            ),
+            (
+                "build.target = \"x86_64-unknown-linux-gnu\"\n",
+                (1, "build.target = \"x86_64-unknown-linux-gnu\""),
+            ),
+            (
+                "build = { rustflags = [] }\n",
+                (1, "build = { rustflags = [] }"),
+            ),
+            (
+                "[build]\n\"build-dir\" = \"/cache\"\n",
+                (2, "\"build-dir\" = \"/cache\""),
+            ),
+            (
+                "[target.x86_64-unknown-linux-gnu]\nlinker = \"cc\"\n",
+                (1, "[target.x86_64-unknown-linux-gnu]"),
+            ),
+            ("[env]\nRUSTFLAGS = \"\"\n", (1, "[env]")),
+            (
+                "[build.\"target\"]\nbuild-dir = \"x\"\n",
+                (1, "[build.\"target\"]"),
+            ),
+            (
+                "[patch.crates-io]\nserde = { path = \"s\" }\n",
+                (1, "[patch.crates-io]"),
+            ),
+            (
+                "[source.crates-io]\nreplace-with = \"v\"\n[source.v]\ndirectory = \"vendor\"\n",
+                (1, "[source.crates-io]"),
+            ),
+            ("[net]\nx = '''\n[build]\n'''\n", (2, "x = '''")),
+            ("[[net]]\n", (1, "[[net]]")),
+            ("[net]\nretry = [\n3]\n", (3, "3]")),
+            ("[build\n", (1, "[build")),
+        ] {
+            assert_eq!(rejected_config_line(text), Some(rejected), "{text}");
+        }
     }
 
     #[test]
@@ -1540,6 +1698,8 @@ mod tests {
             .chain(ALLOWED_CARGO_VARIABLES)
             .chain(DIRECTORY_CONFIGS)
             .chain(HOME_CONFIGS)
+            .chain(ALLOWED_CONFIG_BUILD_KEYS)
+            .chain(ALLOWED_CONFIG_TABLES)
         {
             assert!(rows.contains(name), "{name}");
         }

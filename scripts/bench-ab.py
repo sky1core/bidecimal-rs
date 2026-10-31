@@ -74,7 +74,6 @@ ALLOWED_CARGO_PREFIXES = (
 )
 ALLOWED_CONFIG_TABLES = {
     "cache", "future-incompat-report", "http", "net", "term", "alias", "credential-alias", "registry", "registries",
-    "source",
 }
 ALLOWED_CONFIG_BUILD_KEYS = {"build-dir", "target-dir"}
 BUILD_OVERRIDES = {

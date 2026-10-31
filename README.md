@@ -176,15 +176,15 @@ The runner rejects build-profile, compiler-flag and target overrides from the
 environment, including empty variables, and from Cargo configuration files in
 either build tree (`--work` `base` and `candidate`), its ancestors, or its
 Cargo home. This keeps the manifest profile recorded in the report consistent
-with the build. Cache, transport, logging, alias, registry and source
-replacement settings are allowed; a configuration file may set only
-`build.build-dir`, `build.target-dir`, and the `alias`, `cache`,
-`credential-alias`, `future-incompat-report`, `http`, `net`, `registries`,
-`registry`, `source` and `term` tables. Each build tree gets its own build
-directory. `RUSTC` remains an explicit compiler selector; the resolved compiler
-and its version are recorded. The checks run before setup and again before
-every build. Run `python3 scripts/test_bench_ab.py` for the guard regression
-tests (no compilation or timing required).
+with the build. Cache, transport, logging, alias and registry settings are
+allowed; a configuration file may set only `build.build-dir`,
+`build.target-dir`, and the `alias`, `cache`, `credential-alias`,
+`future-incompat-report`, `http`, `net`, `registries`, `registry` and `term`
+tables. Each build tree gets its own build directory. `RUSTC` remains an
+explicit compiler selector; the resolved compiler and its version are recorded.
+The checks run before setup and again before every build. Run `python3
+scripts/test_bench_ab.py` for the guard regression tests (no compilation or
+timing required).
 
 `--filter <regex>` passes a regular expression to Criterion, so that only the
 benchmarks whose IDs, such as `keycmp_d64_same/set`, match it are listed and

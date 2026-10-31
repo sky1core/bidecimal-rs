@@ -68,8 +68,7 @@ class BuildEnvironmentTests(unittest.TestCase):
         p.parent.mkdir()
         p.write_text('[build]\nbuild-dir = "/cache"\ntarget-dir = "/target"\n[net]\nretry = 3\n'
                      '[term]\ncolor = "never"\n[http]\ntimeout = 30\n[cache]\nauto-clean-frequency = "never"\n'
-                     '[alias]\nb = "build"\n[registries.crates-io]\nprotocol = "sparse"\n'
-                     '[source.crates-io]\nreplace-with = "mirror"\n[source.mirror]\nregistry = "sparse+https://example.com/"\n')
+                     '[alias]\nb = "build"\n[registries.crates-io]\nprotocol = "sparse"\n')
         BENCH.check_build_environment([self.work])
 
     def test_build_settings_in_configuration_rejected(self):
@@ -80,6 +79,7 @@ class BuildEnvironmentTests(unittest.TestCase):
             ('build.target = "x86_64-unknown-linux-gnu"\n', "sets build.target:"),
             ('[target.x86_64-unknown-linux-gnu]\nrustflags = []\n', "sets target:"),
             ('[env]\nRUSTFLAGS = ""\n', "sets env:"),
+            ('[source.crates-io]\nreplace-with = "v"\n[source.v]\ndirectory = "vendor"\n', "sets source:"),
             ("[build\n", "cannot check Cargo configuration"),
         )
         for text, message in cases:
