@@ -465,10 +465,11 @@ fn cmp_mag(a: Unpacked, b: Unpacked) -> Ordering {
 )]
 fn clamped_magnitudes_32(a: Unpacked, b: Unpacked) -> (u64, u64) {
     let gap = (a.exp - b.exp).clamp(-7, 7);
-    (
-        (a.coeff as u64) * pow10_64(gap.max(0) as u32),
-        (b.coeff as u64) * pow10_64((-gap).max(0) as u32),
-    )
+    if gap >= 0 {
+        ((a.coeff as u64) * pow10_64(gap as u32), b.coeff as u64)
+    } else {
+        (a.coeff as u64, (b.coeff as u64) * pow10_64((-gap) as u32))
+    }
 }
 
 #[inline]
@@ -498,10 +499,25 @@ fn clamped_magnitudes_64(a: Unpacked, b: Unpacked) -> (u128, u128) {
         crate::verus_model::lemma_comparison_scale_64(b.coeff as int, (if gap < 0 { -(gap as int) } else { 0 }) as nat);
         crate::verus_model::lemma_comparison_clamp_64(a, b, gap as int);
     }
-    (
-        u128::from(a.coeff as u64) * u128::from(pow10_64(gap.max(0) as u32)),
-        u128::from(b.coeff as u64) * u128::from(pow10_64((-gap).max(0) as u32)),
-    )
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        vstd::arithmetic::power::lemma_pow0(10);
+        assert(a.coeff * vstd::arithmetic::power::pow(10, 0) == a.coeff) by (nonlinear_arith)
+            requires vstd::arithmetic::power::pow(10, 0) == 1;
+        assert(b.coeff * vstd::arithmetic::power::pow(10, 0) == b.coeff) by (nonlinear_arith)
+            requires vstd::arithmetic::power::pow(10, 0) == 1;
+    }
+    if gap >= 0 {
+        (
+            u128::from(a.coeff as u64) * u128::from(pow10_64(gap as u32)),
+            b.coeff,
+        )
+    } else {
+        (
+            a.coeff,
+            u128::from(b.coeff as u64) * u128::from(pow10_64((-gap) as u32)),
+        )
+    }
 }
 
 #[inline]
@@ -534,31 +550,71 @@ fn eq_64(a: Unpacked, b: Unpacked) -> bool {
 ))]
 #[expect(
     clippy::arithmetic_side_effects,
-    reason = "clamped magnitudes are below 10^32 < 2^107, so i128 conversion and sign application are exact"
+    reason = "coefficients < 10^16 and scales <= 10^16 fit i64; signed products are below 10^32 < 2^107"
 )]
 fn cmp_64(a: Unpacked, b: Unpacked) -> Ordering {
+    let ac = a.coeff as i64;
+    let bc = b.coeff as i64;
+    let ac = if a.neg { -ac } else { ac };
+    let bc = if b.neg { -bc } else { bc };
     if a.exp == b.exp {
         #[cfg(verus_keep_ghost)]
-        proof! { vstd::arithmetic::power::lemma_pow0(10); }
-        let ac = a.coeff as i128;
-        let bc = b.coeff as i128;
-        let ac = if a.neg { -ac } else { ac };
-        let bc = if b.neg { -bc } else { bc };
-        #[cfg(verus_keep_ghost)]
         proof! {
+            vstd::arithmetic::power::lemma_pow0(10);
+            assert(a.coeff * vstd::arithmetic::power::pow(10, 0) == a.coeff) by (nonlinear_arith)
+                requires vstd::arithmetic::power::pow(10, 0) == 1;
+            assert(b.coeff * vstd::arithmetic::power::pow(10, 0) == b.coeff) by (nonlinear_arith)
+                requires vstd::arithmetic::power::pow(10, 0) == 1;
             assert(crate::verus_model::comparison_value(a, b) == ac as int);
             assert(crate::verus_model::comparison_value(b, a) == bc as int);
         }
         return ac.cmp(&bc);
     }
-    let (ac, bc) = clamped_magnitudes_64(a, b);
+    let gap = (a.exp - b.exp).clamp(-16, 16);
+    let swap = gap < 0;
+    let high = if swap { bc } else { ac };
+    let low = if swap { ac } else { bc };
+    let distance = if swap { -gap } else { gap };
     #[cfg(verus_keep_ghost)]
-    proof! { crate::verus_model::lemma_comparison_signs(a, b, ac as int, bc as int); }
-    let ac = ac as i128;
-    let bc = bc as i128;
-    let ac = if a.neg { -ac } else { ac };
-    let bc = if b.neg { -bc } else { bc };
-    ac.cmp(&bc)
+    proof! { crate::verus_model::lemma_comparison_scale_64(0, distance as nat); }
+    let scale = pow10_64(distance as u32) as i64;
+    #[cfg(verus_keep_ghost)]
+    proof_decl! {
+        let ghost am = a.coeff * vstd::arithmetic::power::pow(10, (if gap > 0 { gap as int } else { 0 }) as nat);
+        let ghost bm = b.coeff * vstd::arithmetic::power::pow(10, (if gap < 0 { -(gap as int) } else { 0 }) as nat);
+        crate::verus_model::lemma_comparison_scale_64(a.coeff as int, (if gap > 0 { gap as int } else { 0 }) as nat);
+        crate::verus_model::lemma_comparison_scale_64(b.coeff as int, (if gap < 0 { -(gap as int) } else { 0 }) as nat);
+        crate::verus_model::lemma_comparison_clamp_64(a, b, gap as int);
+        crate::verus_model::lemma_comparison_signs(a, b, am, bm);
+        vstd::arithmetic::power::lemma_pow0(10);
+        if swap {
+            assert(am == a.coeff as int) by (nonlinear_arith)
+                requires am == a.coeff as int * vstd::arithmetic::power::pow(10, 0),
+                    vstd::arithmetic::power::pow(10, 0) == 1;
+            assert(high as int * scale as int == if b.neg { -bm } else { bm }) by (nonlinear_arith)
+                requires high as int == if b.neg { -(b.coeff as int) } else { b.coeff as int },
+                    bm == b.coeff as int * scale as int;
+        } else {
+            assert(bm == b.coeff as int) by (nonlinear_arith)
+                requires bm == b.coeff as int * vstd::arithmetic::power::pow(10, 0),
+                    vstd::arithmetic::power::pow(10, 0) == 1;
+            assert(high as int * scale as int == if a.neg { -am } else { am }) by (nonlinear_arith)
+                requires high as int == if a.neg { -(a.coeff as int) } else { a.coeff as int },
+                    am == a.coeff as int * scale as int;
+        }
+    }
+    // Select the operand to align before the single widening multiplication.
+    let scaled = i128::from(high) * i128::from(scale);
+    let order = scaled.cmp(&i128::from(low));
+    if swap {
+        match order {
+            Ordering::Less => Ordering::Greater,
+            Ordering::Equal => Ordering::Equal,
+            Ordering::Greater => Ordering::Less,
+        }
+    } else {
+        order
+    }
 }
 
 #[inline]
@@ -662,19 +718,21 @@ const _: () = assert!(10_u128.pow(38) < (1_u128 << 127));
 )]
 pub(crate) fn cmp<W: Width>(a: Unpacked, b: Unpacked) -> Ordering {
     if W::LAYOUT.digits == 7 {
-        if a.exp == b.exp {
-            let ac = a.coeff as i64;
-            let bc = b.coeff as i64;
-            let ac = if a.neg { -ac } else { ac };
-            let bc = if b.neg { -bc } else { bc };
-            return ac.cmp(&bc);
-        }
-        let (ac, bc) = clamped_magnitudes_32(a, b);
-        let ac = ac as i64;
-        let bc = bc as i64;
+        let ac = a.coeff as i64;
+        let bc = b.coeff as i64;
         let ac = if a.neg { -ac } else { ac };
         let bc = if b.neg { -bc } else { bc };
-        return ac.cmp(&bc);
+        if a.exp == b.exp {
+            return ac.cmp(&bc);
+        }
+        let gap = (a.exp - b.exp).clamp(-7, 7);
+        let swap = gap < 0;
+        let high = if swap { bc } else { ac };
+        let low = if swap { ac } else { bc };
+        let distance = if swap { -gap } else { gap };
+        let scaled = high * pow10_64(distance as u32) as i64;
+        let order = scaled.cmp(&low);
+        return if swap { order.reverse() } else { order };
     }
     if W::LAYOUT.digits == 16 {
         return cmp_64(a, b);
@@ -732,7 +790,7 @@ const _: () = assert!((10_u128.pow(34) - 1) * 10_001 < (1_u128 << 127));
 #[inline]
 #[expect(
     clippy::arithmetic_side_effects,
-    reason = "decoded exponents differ by at most 12287; the gap window bounds the sum by (10^34-1)*10001 < 2^127; otherwise 10*abs(gap)+3*bit_width(high coefficient) <= 378 bounds its scaled magnitude below 2^126 and the other below 10^34 < 2^126; guard arithmetic fits u32 and InRange::checked validates the preferred-exponent result"
+    reason = "decoded exponents differ by at most 12287; the gap window bounds the sum by (10^34-1)*10001 < 2^127; InRange::checked validates the preferred-exponent result"
 )]
 #[cfg_attr(verus_keep_ghost, verus_spec(ret =>
     requires
@@ -761,11 +819,10 @@ pub(crate) fn add_sub<W: Width>(
         vstd::arithmetic::power::lemma_pow0(10);
     }
     let gap = a.exp - b.exp;
-    if W::LAYOUT.digits < 34 {
-        let distance = if gap >= 0 { gap as u32 } else { (-gap) as u32 };
-        if distance > 4 {
-            return None;
-        }
+    // Keep the original universally safe window. Wider gaps use the general path.
+    let distance = if gap >= 0 { gap as u32 } else { (-gap) as u32 };
+    if distance > 4 {
+        return None;
     }
     let b_neg = b.neg ^ subtract;
     let ac = a.coeff as i128;
@@ -786,41 +843,46 @@ pub(crate) fn add_sub<W: Width>(
                 crate::verus_model::lemma_add_fast_scale(ac as int, a_shift as nat);
                 crate::verus_model::lemma_add_fast_scale(bc as int, b_shift as nat);
             }
-            ac *= pow10_64(a_shift) as i128;
-            bc *= pow10_64(b_shift) as i128;
-        } else {
-            let distance = if gap >= 0 { gap as u32 } else { (-gap) as u32 };
-            if distance > 37 {
-                return None;
+            let a_scale = pow10_64(a_shift);
+            let b_scale = pow10_64(b_shift);
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                vstd::arithmetic::power::lemma_pow0(10);
+                if gap <= 0 { assert(a_shift == 0); assert(a_scale == 1); }
+                if gap >= 0 { assert(b_shift == 0); assert(b_scale == 1); }
             }
-            let high_coeff = if gap > 0 { a.coeff } else { b.coeff };
-            let bits = high_coeff.bit_width();
-            if 10 * distance + 3 * bits.min(112) > 378 {
-                return None;
-            }
-            if gap > 0 {
-                #[cfg(verus_keep_ghost)]
-                proof! {
-                    if gap <= 4 {
-                        crate::verus_model::lemma_add_fast_scale(ac as int, gap as nat);
-                    } else {
-                        crate::verus_model::lemma_add_bit_scale(ac as int, bits as nat, gap as nat);
-                    }
+            #[cfg(verus_keep_ghost)]
+            proof! { assert(ac as int == ac0); assert(bc as int == bc0); }
+            ac *= a_scale as i128;
+            #[cfg(verus_keep_ghost)]
+            proof! { assert(ac as int == ac0 * (a_scale as int)); }
+            bc *= b_scale as i128;
+            #[cfg(verus_keep_ghost)]
+            proof! { assert(bc as int == bc0 * (b_scale as int)); }
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                if gap <= 0 {
+                    assert(a_scale == 1);
+                    assert(ac as int == ac0) by (nonlinear_arith)
+                        requires ac as int == ac0 * (a_scale as int), a_scale == 1;
                 }
-                ac *= pow10(distance) as i128;
-            } else if gap < 0 {
-                #[cfg(verus_keep_ghost)]
-                proof! {
-                    if -gap <= 4 {
-                        crate::verus_model::lemma_add_fast_scale(bc as int, (-gap) as nat);
-                    } else {
-                        crate::verus_model::lemma_add_bit_scale(bc as int, bits as nat, (-gap) as nat);
-                    }
+                if gap >= 0 {
+                    assert(b_scale == 1);
+                    assert(bc as int == bc0) by (nonlinear_arith)
+                        requires bc as int == bc0 * (b_scale as int), b_scale == 1;
                 }
-                bc *= pow10(distance) as i128;
             }
+        } else if gap > 0 {
+            #[cfg(verus_keep_ghost)]
+            proof! { crate::verus_model::lemma_add_fast_scale(ac as int, gap as nat); }
+            ac *= pow10(distance) as i128;
+        } else if gap < 0 {
+            #[cfg(verus_keep_ghost)]
+            proof! { crate::verus_model::lemma_add_fast_scale(bc as int, (-gap) as nat); }
+            bc *= pow10(distance) as i128;
         }
     }
+
     #[cfg(verus_keep_ghost)]
     proof! {
         use crate::verus_model::*;

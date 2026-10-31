@@ -526,6 +526,7 @@ fn ops(c: &mut Criterion) {
 }
 
 criterion_group! { name = benches; config = Criterion::default()
-.warm_up_time(Duration::from_secs(1)).measurement_time(Duration::from_secs(2)).sample_size(100);
+.warm_up_time(Duration::from_millis(500)).measurement_time(Duration::from_secs(1)).sample_size(100)
+.nresamples(2000);
 targets = ops }
 criterion_main!(benches);

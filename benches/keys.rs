@@ -2,7 +2,7 @@ use bidecimal::{Decimal32, Decimal64, Decimal128, OrderedDecimal};
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     hash::{BuildHasher, Hash},
     time::Duration,
 };
@@ -31,6 +31,15 @@ fn pairs(rng: &mut SplitMix64, distribution: &str, digits: u32) -> Vec<(Spec, Sp
                 let x = rng.spec(digits - 2);
                 (x, x)
             }
+            "same_exp_distinct" => {
+                let x = rng.spec(digits);
+                let mut y = rng.spec(digits);
+                y.exp = x.exp;
+                if x.coeff == y.coeff && x.neg == y.neg {
+                    y.neg = !y.neg;
+                }
+                (x, y)
+            }
             "cohort" => {
                 let x = rng.spec(digits - 2);
                 let y = x.form(1 + rng.below(2) as u32);
@@ -46,12 +55,22 @@ fn width<T: Number>(c: &mut Criterion, rng: &mut SplitMix64)
 where
     Key<T>: Ord + Hash + Copy,
 {
-    for distribution in ["same", "cohort", "zero", "random"] {
-        let specs = pairs(rng, distribution, T::DIGITS);
+    for distribution in ["same", "same_exp_distinct", "cohort", "zero", "random"] {
+        // Isolate the new fixture so existing benchmark inputs remain unchanged.
+        let specs = if distribution == "same_exp_distinct" {
+            let mut fixture_rng = SplitMix64(SEED ^ 0x7361_6d65_6578_7000 ^ u64::from(T::DIGITS));
+            pairs(&mut fixture_rng, distribution, T::DIGITS)
+        } else {
+            pairs(rng, distribution, T::DIGITS)
+        };
         let values: Vec<(T, T)> = specs.iter().map(|(x, y)| (x.parse(), y.parse())).collect();
         let keys: Vec<(Key<T>, Key<T>)> = values.iter().map(|&(a, b)| (key(a), key(b))).collect();
         for ((x, y), &(a, b)) in specs.iter().zip(&values) {
             let order = x.value().cmp(&y.value());
+            if distribution == "same_exp_distinct" {
+                assert_eq!(x.exp, y.exp);
+                assert_ne!(order, Ordering::Equal);
+            }
             assert_eq!(a == b, order == Ordering::Equal, "{a:?} == {b:?}");
             assert_eq!(a.partial_cmp(&b), Some(order), "{a:?} <=> {b:?}");
             assert_eq!(key(a).cmp(&key(b)), order, "key {a:?} <=> {b:?}");
@@ -95,10 +114,8 @@ where
     for n in SIZES {
         let w = Workload::<T>::new(rng, n).map(key);
         assert_ordered(T::NAME, &w);
-        container::<_, BTreeSet<_>>(c, T::NAME, &w);
         container::<_, BTreeMap<_, u32>>(c, T::NAME, &w);
         container::<_, HashSet<_, Build>>(c, T::NAME, &w);
-        container::<_, HashMap<_, u32, Build>>(c, T::NAME, &w);
     }
 }
 
@@ -207,6 +224,7 @@ fn keys(c: &mut Criterion) {
 }
 
 criterion_group! { name = benches; config = Criterion::default()
-.warm_up_time(Duration::from_secs(1)).measurement_time(Duration::from_secs(2)).sample_size(100);
+.warm_up_time(Duration::from_millis(500)).measurement_time(Duration::from_secs(1)).sample_size(100)
+.nresamples(2000);
 targets = keys }
 criterion_main!(benches);

@@ -25,6 +25,11 @@ on:
       benches:
         description: Criterion targets, separated by spaces
         default: finite keys special ops
+      profile:
+        description: Timed build profile
+        type: choice
+        options: [bench, bench-fat-lto]
+        default: bench
 
 permissions:
   contents: read
@@ -59,13 +64,14 @@ jobs:
       - name: Compare
         env:
           ROUNDS: ${{ github.event_name == 'pull_request' && '2' || inputs.rounds }}
-          BENCHES: ${{ github.event_name == 'pull_request' && 'ops finite' || inputs.benches }}
+          PROFILE: ${{ github.event_name == 'pull_request' && 'bench' || inputs.profile }}
+          BENCHES: ${{ github.event_name == 'pull_request' && 'ops finite keys special' || inputs.benches }}
         run: |
           targets=()
           for target in $BENCHES; do targets+=(--bench "$target"); done
           if [ ${#targets[@]} -eq 0 ]; then echo "No benchmark targets given." >&2; exit 1; fi
           python3 scripts/bench-ab.py --base "$BASE" --candidate "$CANDIDATE" "${targets[@]}" \
-            --rounds "$ROUNDS" --analyze-codegen --work "$RUNNER_TEMP/bench-trees" --out bench-out
+            --profile "$PROFILE" --rounds "$ROUNDS" --analyze-codegen --work "$RUNNER_TEMP/bench-trees" --out bench-out
       - name: Summary
         if: always()
         env:

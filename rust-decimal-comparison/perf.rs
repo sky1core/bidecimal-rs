@@ -487,7 +487,7 @@ fn stats(
     Ok((path, vec![(implementation, summary)], None))
 }
 
-fn benchmark(root: &Path, args: &[&str], baseline_first: bool) -> Result<()> {
+fn benchmark(root: &Path, profile: &str, args: &[&str], baseline_first: bool) -> Result<()> {
     let start = Instant::now();
     let pinned = pinned_channel()?;
     let compiler = raw_command("rustup", &["which", "--toolchain", &pinned, "rustc"])?;
@@ -503,6 +503,8 @@ fn benchmark(root: &Path, args: &[&str], baseline_first: bool) -> Result<()> {
             "bench",
             "--offline",
             "--locked",
+            "--profile",
+            profile,
             "--bench",
             "paths",
             "--",
@@ -576,22 +578,34 @@ fn verify_toolchain() -> Result<()> {
 const DEFAULT_MAX_WAIT_SECONDS: u64 = 120;
 const LOAD_POLL_SECONDS: u64 = 5;
 
-fn options(args: impl IntoIterator<Item = String>) -> Result<(PathBuf, Duration)> {
+fn options(args: impl IntoIterator<Item = String>) -> Result<(PathBuf, Duration, &'static str)> {
     let mut args = args.into_iter();
     let root = PathBuf::from(args.next().ok_or(
-        "usage: perf-runner NEW_OUTPUT_DIRECTORY [--max-wait-seconds SECONDS] (default: 120)",
+        "usage: perf-runner NEW_OUTPUT_DIRECTORY [--max-wait-seconds SECONDS] [--profile bench|bench-fat-lto] (defaults: 120 seconds, bench)",
     )?);
-    let seconds = match args.next() {
-        None => DEFAULT_MAX_WAIT_SECONDS,
-        Some(flag) if flag == "--max-wait-seconds" => {
-            args.next().ok_or("missing maximum wait")?.parse()?
+    let mut seconds = DEFAULT_MAX_WAIT_SECONDS;
+    let mut profile = "bench";
+    let mut seen_wait = false;
+    let mut seen_profile = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--max-wait-seconds" if !seen_wait => {
+                seconds = args.next().ok_or("missing maximum wait")?.parse()?;
+                seen_wait = true;
+            }
+            "--profile" if !seen_profile => {
+                profile = match args.next().as_deref() {
+                    Some("bench") => "bench",
+                    Some("bench-fat-lto") => "bench-fat-lto",
+                    Some(_) => return Err("profile must be bench or bench-fat-lto".into()),
+                    None => return Err("missing profile".into()),
+                };
+                seen_profile = true;
+            }
+            _ => return Err(format!("unexpected or repeated option: {flag}").into()),
         }
-        Some(_) => return Err("expected --max-wait-seconds".into()),
-    };
-    if args.next().is_some() {
-        return Err("too many arguments".into());
     }
-    Ok((root, Duration::from_secs(seconds)))
+    Ok((root, Duration::from_secs(seconds), profile))
 }
 
 const REJECTED_VARIABLES: [&str; 8] = [
@@ -614,9 +628,29 @@ const ALLOWED_CARGO_VARIABLES: [&str; 8] = [
     "CARGO_CACHE_AUTO_CLEAN_FREQUENCY",
     "CARGO_FUTURE_INCOMPAT_REPORT_FREQUENCY",
 ];
-const ALLOWED_CARGO_PREFIXES: [&str; 3] = ["CARGO_TERM_", "CARGO_HTTP_", "CARGO_NET_"];
+const ALLOWED_CARGO_PREFIXES: [&str; 7] = [
+    "CARGO_TERM_",
+    "CARGO_HTTP_",
+    "CARGO_NET_",
+    "CARGO_ALIAS_",
+    "CARGO_CREDENTIAL_ALIAS_",
+    "CARGO_REGISTRY_",
+    "CARGO_REGISTRIES_",
+];
 const DIRECTORY_CONFIGS: [&str; 2] = [".cargo/config.toml", ".cargo/config"];
 const HOME_CONFIGS: [&str; 2] = ["config.toml", "config"];
+const ALLOWED_CONFIG_TABLES: [&str; 9] = [
+    "alias",
+    "cache",
+    "credential-alias",
+    "future-incompat-report",
+    "http",
+    "net",
+    "registries",
+    "registry",
+    "term",
+];
+const ALLOWED_CONFIG_BUILD_KEYS: [&str; 2] = ["build-dir", "target-dir"];
 
 fn rejected_variable(key: &str) -> bool {
     REJECTED_VARIABLES.contains(&key)
@@ -662,10 +696,74 @@ fn verify_build_variables(variables: impl IntoIterator<Item = std::ffi::OsString
     Ok(())
 }
 
-fn verify_configs_absent(candidates: &[PathBuf]) -> Result<()> {
+fn bare_segments(key: &str) -> Vec<&str> {
+    key.split('.')
+        .map(str::trim)
+        .take_while(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+        .collect()
+}
+
+fn allowed_config_path(path: &[&str]) -> bool {
+    match path {
+        [table, ..] if ALLOWED_CONFIG_TABLES.contains(table) => true,
+        ["build", key, ..] => ALLOWED_CONFIG_BUILD_KEYS.contains(key),
+        _ => false,
+    }
+}
+
+fn rejected_config_line(text: &str) -> Option<(usize, &str)> {
+    let mut table = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let allowed = if line.contains("\"\"\"") || line.contains("'''") || line.starts_with("[[") {
+            false
+        } else if let Some(header) = line.strip_prefix('[') {
+            match header.split_once(']') {
+                Some((name, _)) => {
+                    table = bare_segments(name);
+                    allowed_config_path(&table) || name.trim() == "build"
+                }
+                None => false,
+            }
+        } else if let Some((key, _)) = line.split_once('=') {
+            allowed_config_path(&[table.as_slice(), bare_segments(key).as_slice()].concat())
+        } else {
+            false
+        };
+        if !allowed {
+            return Some((index + 1, line));
+        }
+    }
+    None
+}
+
+fn verify_configs(candidates: &[PathBuf]) -> Result<()> {
     for config in candidates {
-        if config.try_exists()? {
-            return Err(format!("Cargo configuration must be absent: {}", config.display()).into());
+        let text = match fs::read_to_string(config) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "cannot read Cargo configuration {}: {error}",
+                    config.display()
+                )
+                .into());
+            }
+        };
+        if let Some((number, line)) = rejected_config_line(&text) {
+            return Err(format!(
+                "Cargo configuration {} line {number} sets a build setting or cannot be checked: {line}",
+                config.display()
+            )
+            .into());
         }
     }
     Ok(())
@@ -675,7 +773,7 @@ fn check_build_environment() -> Result<()> {
     let cwd = env::current_dir()?;
     let home = cargo_home(&cwd, env::var_os("CARGO_HOME"), env::home_dir())?;
     verify_build_variables(env::vars_os().map(|(key, _)| key))?;
-    verify_configs_absent(&cargo_config_candidates(&cwd, &home)?)
+    verify_configs(&cargo_config_candidates(&cwd, &home)?)
 }
 
 fn build_check_rows(host: &str) -> String {
@@ -684,12 +782,16 @@ fn build_check_rows(host: &str) -> String {
         .map(|prefix| format!("{prefix}*"))
         .collect();
     format!(
-        "| Target | {host} (host of the pinned rustc: the benchmark build passes no --target, CARGO_BUILD_TARGET is absent and no Cargo configuration file exists) |\n| Build environment variables | absent: {}, and every CARGO_* variable except {}, {} |\n| Cargo configuration files | absent: {} in the working directory and every ancestor directory; {} in the Cargo home |\n",
+        "| Target | {host} (host of the pinned rustc: the benchmark build passes no --target, CARGO_BUILD_TARGET is absent and no Cargo configuration file sets a target) |\n| Build environment variables | absent: {}, and every CARGO_* variable except {}, {} |\n| Cargo configuration files | {} in the working directory and every ancestor directory and {} in the Cargo home set nothing but {} and the {} tables |\n",
         REJECTED_VARIABLES.join(", "),
         ALLOWED_CARGO_VARIABLES.join(", "),
         prefixes.join(", "),
         DIRECTORY_CONFIGS.join(", "),
         HOME_CONFIGS.join(", "),
+        ALLOWED_CONFIG_BUILD_KEYS
+            .map(|key| format!("build.{key}"))
+            .join(", "),
+        ALLOWED_CONFIG_TABLES.join(", "),
     )
 }
 
@@ -730,7 +832,7 @@ fn wait_for_load(
 }
 
 fn main() -> Result<()> {
-    let (root, maximum_wait) = options(env::args().skip(1))?;
+    let (root, maximum_wait, profile) = options(env::args().skip(1))?;
     check_build_environment()?;
     verify_toolchain()?;
     if root.exists() {
@@ -756,7 +858,7 @@ fn main() -> Result<()> {
     };
     let source = source_id()?;
     let metadata = format!(
-        "| Field | Value |\n|---|---|\n| rustc | {} |\n| cargo | {} |\n| Commit | {} |\n| Working tree | {} |\n| Source fingerprint | {source} |\n| CPU | {cpu} |\n| OS | {} |\n{}",
+        "| Field | Value |\n|---|---|\n| rustc | {} |\n| cargo | {} |\n| Commit | {} |\n| Working tree | {} |\n| Source fingerprint | {source} |\n| Profile | {profile} |\n| CPU | {cpu} |\n| OS | {} |\n{}",
         command("rustc", &["-V"])?,
         command("cargo", &["-V"])?,
         command("git", &["rev-parse", "HEAD"])?,
@@ -781,7 +883,7 @@ fn main() -> Result<()> {
     println!("{metadata}");
     let check = root.join("preflight");
     fs::create_dir(&check)?;
-    benchmark(&check, &["--test"], false)?;
+    benchmark(&check, profile, &["--test"], false)?;
     let mut report = metadata;
     let preflight = fs::read_to_string(check.join("full-output.txt"))?;
     report.push_str("\n```text\n");
@@ -818,7 +920,7 @@ fn main() -> Result<()> {
             std::thread::sleep,
         )?;
         let date = command("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"])?;
-        benchmark(&dir, &["--noplot"], session == 2)?;
+        benchmark(&dir, profile, &["--noplot"], session == 2)?;
         let end_load = load_average(&os)?;
         let log = fs::read_to_string(dir.join("full-output.txt"))?;
         if workload_lines(&log) != checks {
@@ -1326,9 +1428,25 @@ mod tests {
     }
 
     #[test]
-    fn command_line_wait_is_explicit_or_documented_default() {
+    fn command_line_options_are_explicit_or_documented_defaults() {
         let parse = |args: &[&str]| options(args.iter().map(|s| (*s).to_owned()));
         assert_eq!(parse(&["output"]).unwrap().1, Duration::from_secs(120));
+        assert_eq!(parse(&["output"]).unwrap().2, "bench");
+        for profile in ["bench", "bench-fat-lto"] {
+            assert_eq!(
+                parse(&["output", "--profile", profile]).unwrap(),
+                (PathBuf::from("output"), Duration::from_secs(120), profile)
+            );
+            for args in [
+                vec!["output", "--profile", profile, "--max-wait-seconds", "0"],
+                vec!["output", "--max-wait-seconds", "0", "--profile", profile],
+            ] {
+                assert_eq!(
+                    parse(&args).unwrap(),
+                    (PathBuf::from("output"), Duration::ZERO, profile)
+                );
+            }
+        }
         assert_eq!(
             parse(&["output", "--max-wait-seconds", "0"]).unwrap().1,
             Duration::ZERO
@@ -1339,6 +1457,17 @@ mod tests {
             vec!["output", "--max-wait-seconds", "-1"],
             vec!["output", "--other", "120"],
             vec!["output", "--max-wait-seconds", "1", "extra"],
+            vec![
+                "output",
+                "--max-wait-seconds",
+                "1",
+                "--max-wait-seconds",
+                "2",
+            ],
+            vec!["output", "--profile"],
+            vec!["output", "--profile", "release"],
+            vec!["output", "--profile", ""],
+            vec!["output", "--profile", "bench", "--profile", "bench-fat-lto"],
         ] {
             assert!(parse(&args).is_err());
         }
@@ -1366,9 +1495,9 @@ mod tests {
             "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
             "CARGO_PROFILE_RELEASE_LTO",
             "CARGO_PROFILE_BENCH_OPT_LEVEL",
+            "CARGO_PROFILE_BENCH_LTO",
+            "CARGO_PROFILE_BENCH_FAT_LTO_CODEGEN_UNITS",
             "CARGO_PROFILE_BENCH_BUILD_OVERRIDE_OPT_LEVEL",
-            "CARGO_ALIAS_BENCH",
-            "CARGO_REGISTRIES_CRATES_IO_PROTOCOL",
             "CARGO_RESOLVER_LOCKFILE_PATH",
             "CARGO_UNSTABLE_BUILD_STD",
         ]) {
@@ -1388,13 +1517,17 @@ mod tests {
             "CARGO_TERM_COLOR",
             "CARGO_HTTP_TIMEOUT",
             "CARGO_NET_OFFLINE",
+            "CARGO_ALIAS_BENCH",
+            "CARGO_CREDENTIAL_ALIAS_X",
+            "CARGO_REGISTRY_TOKEN",
+            "CARGO_REGISTRIES_CRATES_IO_PROTOCOL",
         ]) {
             verify_build_variables(vec![key.into()]).unwrap();
         }
     }
 
     #[test]
-    fn refuses_cargo_configuration_files() {
+    fn checks_cargo_configuration_files() {
         let root = env::current_dir()
             .unwrap()
             .join(format!("target/perf-env-fixture-{}", std::process::id()));
@@ -1412,7 +1545,15 @@ mod tests {
             assert_eq!(candidates.len(), 10);
             candidates
         };
-        verify_configs_absent(&candidates_inside(&root.join("clean"))).unwrap();
+        let clean = root.join("clean");
+        let candidates = candidates_inside(&clean);
+        verify_configs(&candidates).unwrap();
+        fs::write(
+            clean.join("home/config.toml"),
+            "[build]\nbuild-dir = \"/cache\"\n",
+        )
+        .unwrap();
+        verify_configs(&candidates).unwrap();
         let cases = [
             ("work/a/b/.cargo/config.toml", "working directory"),
             ("work/a/b/.cargo/config", "working directory"),
@@ -1427,15 +1568,75 @@ mod tests {
             let candidates = candidates_inside(&case);
             let file = case.join(config);
             fs::create_dir_all(file.parent().unwrap()).unwrap();
-            fs::write(&file, "").unwrap();
+            fs::write(&file, "[profile.bench]\nlto = \"fat\"\n").unwrap();
             assert_eq!(
-                verify_configs_absent(&candidates).unwrap_err().to_string(),
-                format!("Cargo configuration must be absent: {}", file.display()),
+                verify_configs(&candidates).unwrap_err().to_string(),
+                format!(
+                    "Cargo configuration {} line 1 sets a build setting or cannot be checked: [profile.bench]",
+                    file.display()
+                ),
                 "{place}: {config}"
             );
         }
         drop(_fixture);
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn reads_cargo_configuration_settings() {
+        for text in [
+            "",
+            "# comment\n\n[build]\nbuild-dir = \"/cache/{workspace-path-hash}\"\ntarget-dir = \"/target\"\n",
+            "build.build-dir = \"/cache\"\n[net]\nretry = 3\n[term]\ncolor = \"never\"\n[http]\ntimeout = 30\n",
+            "[cache]\nauto-clean-frequency = \"never\"\n[future-incompat-report]\nfrequency = \"never\"\n",
+            "net.retry = 3\n[net.ssh]\nknown-hosts = [\"a\"]\n",
+            "[alias]\nb = \"build\"\n[registries.crates-io]\nprotocol = \"sparse\"\n[registry]\ndefault = \"crates-io\"\n",
+            "[credential-alias]\nx = \"cargo:token\"\n[ build ]\nbuild-dir = \"/cache\"\n[net.\"x\"]\ny = 1\n",
+        ] {
+            assert_eq!(rejected_config_line(text), None, "{text}");
+        }
+        for (text, rejected) in [
+            ("[profile.bench]\nlto = \"fat\"\n", (1, "[profile.bench]")),
+            (
+                "[build]\nbuild-dir = \"/cache\"\nrustflags = [\"-Ctarget-cpu=native\"]\n",
+                (3, "rustflags = [\"-Ctarget-cpu=native\"]"),
+            ),
+            (
+                "build.target = \"x86_64-unknown-linux-gnu\"\n",
+                (1, "build.target = \"x86_64-unknown-linux-gnu\""),
+            ),
+            (
+                "build = { rustflags = [] }\n",
+                (1, "build = { rustflags = [] }"),
+            ),
+            (
+                "[build]\n\"build-dir\" = \"/cache\"\n",
+                (2, "\"build-dir\" = \"/cache\""),
+            ),
+            (
+                "[target.x86_64-unknown-linux-gnu]\nlinker = \"cc\"\n",
+                (1, "[target.x86_64-unknown-linux-gnu]"),
+            ),
+            ("[env]\nRUSTFLAGS = \"\"\n", (1, "[env]")),
+            (
+                "[build.\"target\"]\nbuild-dir = \"x\"\n",
+                (1, "[build.\"target\"]"),
+            ),
+            (
+                "[patch.crates-io]\nserde = { path = \"s\" }\n",
+                (1, "[patch.crates-io]"),
+            ),
+            (
+                "[source.crates-io]\nreplace-with = \"v\"\n[source.v]\ndirectory = \"vendor\"\n",
+                (1, "[source.crates-io]"),
+            ),
+            ("[net]\nx = '''\n[build]\n'''\n", (2, "x = '''")),
+            ("[[net]]\n", (1, "[[net]]")),
+            ("[net]\nretry = [\n3]\n", (3, "3]")),
+            ("[build\n", (1, "[build")),
+        ] {
+            assert_eq!(rejected_config_line(text), Some(rejected), "{text}");
+        }
     }
 
     #[test]
@@ -1497,6 +1698,8 @@ mod tests {
             .chain(ALLOWED_CARGO_VARIABLES)
             .chain(DIRECTORY_CONFIGS)
             .chain(HOME_CONFIGS)
+            .chain(ALLOWED_CONFIG_BUILD_KEYS)
+            .chain(ALLOWED_CONFIG_TABLES)
         {
             assert!(rows.contains(name), "{name}");
         }

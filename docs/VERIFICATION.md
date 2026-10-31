@@ -243,9 +243,13 @@ proof-result files are committed.
 ### Direct Kani harnesses
 
 The harnesses in `src/layout_proofs.rs`, `src/kernel_proofs.rs` and
-`src/parse_proofs.rs` are compiled only under `cfg(kani)`. The suite lists
-64 harnesses and uses Kani 0.68.0 (CBMC 6.11.0, nightly-2026-08-21)
-on aarch64 macOS.
+`src/parse_proofs.rs` are compiled only under `cfg(kani)`. The suite contains
+64 harnesses. The final implementation after the accepted changes and
+retired-proof cleanup passed all 64 on 2026-10-31 using Kani 0.68.0
+(CBMC 6.11.0, `nightly-2026-08-21-x86_64-unknown-linux-gnu`) on Linux x86_64.
+This is Kani's own toolchain, not the stable toolchain in
+`rust-toolchain.toml`. This result is not
+an aarch64 execution result.
 Each row is a direct proof of the Rust code over the stated domain and nothing
 more. The files contain only the harnesses listed in the two tables below.
 
@@ -480,7 +484,7 @@ retained evidence is not a substitute for a proof.
 
 | Family and exact required domain | What is unproven and why it is hard | Retained evidence |
 |---|---|---|
-| Composition of native general addition/subtraction with public dispatch: every canonical operand pair and result width, specials and all three modes | The native finite computation itself is proved above. Its public callers still must establish finite canonical inputs and select the appropriate format; the compile-time assertions prove the eight-width selection, but not runtime extraction, special handling, encoding or public overflow mapping. The public type methods and the common general-kernel selector are not verified by Verus. | The sealed operand implementations and selection assertions, canonical-storage proofs, `addsub_all_27_coefficient_gap_sign_classes`, exact/compression boundary tests and independent BigInt differentials. |
+| Composition of native general addition/subtraction with public dispatch: every canonical operand pair and result width, specials and all three modes | The native finite computation itself is proved above. Its public callers still must establish finite canonical inputs and select the appropriate format; the compile-time assertions prove the eight-width selection, but not runtime extraction, special handling, encoding or public overflow mapping. The public type methods and the common general-kernel selector are not verified by Verus. | The sealed operand implementations and selection assertions, canonical-storage proofs, `addsub_all_27_coefficient_gap_sign_classes`, general exact/compression boundary tests and independent BigInt differentials. These do not constitute dedicated coverage of every narrow-only boundary; see the explicit coverage limitation below. |
 | Special-value dispatch and results: all canonical operands, width combinations, modes, quantize targets, multiple steps and parsing/formatting inputs | Public class dispatch, NaN selection/quieting/payload fitting, invalid-operation results, zero-divisor results, directed overflow mapping, total comparison and OrderedDecimal key semantics have no full-domain direct proof. Kani covers special storage, constants and widening/narrowing back only; the finite Verus proofs assume their finite preconditions. | The Infinity and NaN source argument, every test in `src/special_tests.rs`, special branches of the four Decimal32 exhaustive tests, and the independent finite differentials. |
 | Caller preconditions of the representation rows: every call from production code that Verus does not verify of `InRange::checked`, `InRange::unchecked`, `unpack_canonical_128`, `canonical`, `is_largest_finite` and `exceeds_max` | Unproven: `checked`, `unchecked`, `is_largest_finite` and `exceeds_max` need `W` to be one of the three formats; `unchecked` also needs the value in range; `unpack_canonical_128` needs a finite canonical encoding; `canonical` needs `c<2^127` and `q<=2^31-39`; `exceeds_max` needs `c<=10^P-1`. The callers (the public types' constants and methods, `mul`, `quantize`, the multiple rounding paths and the parsers `parse_32`, `parse_64`, `parse_chunks` and `parse_general`) are not verified. | `Width` is sealed and implemented only by the three formats; finite storage comes from validated finite bits or `encode`; special storage is classified before finite extraction; the value-range argument recorded at each caller; the Kani harnesses and tests that exercise those callers. |
 | Caller preconditions of the Verus-proved helpers: every call from production code that Verus does not verify of `div_rem_pow10`, `div_rem_pow10_64`, `div_rem_scaled`, `strip_trailing_zeros`, `strip_trailing_zeros_64`, `scaled_rem`, `scaled_is_multiple`, `fit`, `add_sub`, `add_sub_general`, the `narrow` entry point and the W64/W128 comparison entry points | Unproven: each caller must establish the helper's precondition (`requires`), and the Verus proofs above assume it; for `fit` this is the format, `c<2^127`, `pref<=q` for nonzero `c` and `c>=10^(P-1)` when sticky; for `add_sub` and `add_sub_general` it is the format and both operands in the Decimal128 range; for the `narrow` entry point it is a W32/W64 result and both operands in the Decimal64 range; for W64/W128 comparison it is both operands in the corresponding range, established by unverified public dispatch and decoding; for `div_rem_scaled` it is `a<10^34`, `0<b<10^34` and `a*10^k<b*10^35`. The hard point is that the callers (the public types' addition and subtraction methods, `mul_general`, `div`, `quantize`, `round_to_multiple`, `round_to_unit_multiple_64`, `round_to_multiple_general`, `parse_general` and width conversion) are not verified. | The value-range argument recorded at each caller (the `clippy::arithmetic_side_effects` reason), the Kani harnesses and tests that exercise those callers, and the caller arguments below. |
@@ -647,79 +651,69 @@ classification and directed result by the inequalities above.
 `fit_preferred_exponent_clamps_and_extreme_i64_exponents` checks exponent
 extremes, zero preferences, precision headroom, and exact underflow recovery.
 
+The existing cross-width BigInt tests exercise public narrow dispatch, but
+there is no dedicated test for every narrow-only boundary (`distance<=18`,
+`high<10^(18-distance)`, trailing-zero retry, and fallback handoff). Do not
+interpret the general boundary tests in the obligations table as such a
+dedicated suite; the narrow finite-domain argument relies on its Verus proof.
+
 ### Bounded exact sum
 
-Domain: canonical finite operands admitted by `abs(gap)<=4` for Decimal32
-and Decimal64 results, and by either `abs(gap)<=4` or
-`10*abs(gap)+3*bit_width(c_high)<=378` for Decimal128 results, where `c_high`
-is the coefficient at the larger exponent. Decoded exponents are in `[-6176,6111]`, so their
-signed difference fits `i32` and the guard arithmetic fits `u32`.
-An explicit `abs(gap)<=37` table-index check exposes a bound already implied
-by admission: a larger gap fails both the four-exponent window and the bit
-guard, even for a zero coefficient. It removes no admitted input.
-Each coefficient is below `10^34`. Decimal32 and Decimal64 results check
-admission before coefficient conversion and effective signs. Decimal128
-results convert coefficients exactly to `i128` and apply effective signs
-before checking admission. The second sign is flipped for subtraction.
-`W::LAYOUT.digits` selects this order at compile time. Only the coefficient
-at the larger exponent has a scale greater than one. For result precision
-below 34 and a nonzero gap, both signed coefficients are multiplied by
-64-bit table powers: `10^max(gap,0)` and `10^max(-gap,0)`. One power is one;
-both indices are at most four. These powers convert exactly to `i128`, and
-`lemma_add_fast_scale` bounds both products even for Decimal128 operands.
-Equal exponents add the signed coefficients directly. Precision 34 retains
-the single-coefficient alignment and bit guard.
+Domain: canonical finite operands with `abs(gap)<=4`, for every result width.
+Decoded exponents are in `[-6176,6111]`, so their signed difference fits
+`i32`. The same admission check runs before coefficient conversion and
+sign application for all widths. Larger gaps return `None` and use the
+general kernel. There is no coefficient bit-width admission guard.
 
-The unconditional four-exponent window bounds the signed sum magnitude by
-`(10^34-1)*10001 < 2^127`, checked at compile time. Outside that window,
-write `b=bit_width(c_high)` and `k=abs(gap)`. The bit guard implies `k<=37`
-and `b+ceil(10*k/3)<=126`. Since `10^3<2^10`,
-`10^k<=2^ceil(10*k/3)`; this follows by induction in steps of three,
-with bases zero, one and two. For a nonzero coefficient `c_high<2^b`,
-so `c_high*10^k<2^126`; zero has the same strict bound.
-The other magnitude is below `10^34<2^126`, so both signs of their sum fit
-`i128`. The Verus lemmas `lemma_add_pow10_bit_bound`, `lemma_add_bit_scale`
-and `lemma_add_sum_bound` establish the power, scaled-product and sum bounds.
-The direct Verus proof of `kernel::add_sub` covers this entire admitted
-domain, for every result width, effective sign and rounding mode; the expanded
-admission does not rely on a separate gap-sampled Kani proof.
-Thus conversion, negation, multiplication, addition, and unsigned absolute
-value are exact without overflow on the admitted domain.
+Each coefficient is below `10^34` and converts exactly to `i128`; the second
+sign is flipped for subtraction. For result precision below 34 and a nonzero
+gap, both signed coefficients are multiplied by 64-bit table powers
+`10^max(gap,0)` and `10^max(-gap,0)`. One power is one and both indices are at
+most four. Precision 34 scales only the coefficient at the larger exponent.
+Equal exponents add the signed coefficients directly.
+
+The four-exponent window bounds the signed sum magnitude by
+`(10^34-1)*10001 < 2^127`, checked at compile time. `lemma_add_fast_scale`
+and `lemma_add_sum_bound` establish the scaled-product and sum bounds.
+The direct Verus proof of `kernel::add_sub` covers this admitted domain for
+every result width, effective sign and rounding mode. Conversion, negation,
+multiplication, addition and unsigned absolute value are exact on that domain.
 
 A fast result is returned only when `InRange::checked` accepts its magnitude
-and the minimum operand exponent. This is the preferred exponent, with no
-precision reduction or underflow. A negative sum is negative; a zero retains
+and minimum operand exponent. This preferred-exponent result needs no
+precision reduction or underflow. A negative sum is negative; a zero keeps
 the common effective sign when the signs agree, and otherwise is negative
-exactly toward negative. The guard is sufficient, not necessary: for example,
-`1e0+100000e-38` is rejected but has the exact result `(10^33+1)e-33`.
-Even an admitted sum may require a cohort shift or rounding and fail the
-checked constructor. All such cases go to the unchanged general kernel.
+exactly toward negative. Admission is sufficient, not necessary: an exact
+representable result can fall outside the window or require a cohort shift.
+Those cases use the general kernel. For example, `1e0+100000e-38` is outside
+the window but has the exact result `(10^33+1)e-33`.
 
 For two nonzero operands, an accepted sum has magnitude below `10^34`.
 The unscaled coefficient is also below `10^34`, so the scaled coefficient
 is below `2*10^34<10^35`. The general algorithm's exact alignment guard
 therefore succeeds, and its magnitude/sign operations give the same sum.
-Its one-zero and both-zero branches represent the same integer, sign and
-preference. Since the accepted result fits at its preference, `fit` gives
-the same fields. The fast kernel returns `Option`: only `Some` carries the
-proved rounded-result contract. Public dispatch with a Decimal128 result,
-or without a rounding direction, passes original operands unchanged to one
-cold slow function for `None` or a special operand. Directed Decimal32 and
-Decimal64 results classify specials before finite extraction and share the
-extracted operands between the fast and selected general kernels; only
-special handling and overflow mapping are cold. Both dispatch forms apply
-the selected general computation, encoding and overflow mapping when needed.
-This partition covers every supported input without claiming that the bit guard admits every
-representable sum.
+Its zero branches represent the same integer, sign and preference. Since
+the result fits at its preference, `fit` gives the same fields.
+
+The fast kernel returns `Option`; only `Some` carries its rounded-result
+contract. Public dispatch uses the same flow for all result widths and
+rounding modes: classify special operands, unpack finite operands, try
+`kernel::add_sub`, immediately encode and return a fast result, otherwise
+call the selected general kernel. `add_sub_general` chooses the narrow
+implementation only for a W32/W64 result with both inputs narrow, and the
+wide implementation otherwise. Special handling and overflow mapping are
+cold; the ordinary finite fallback is not a single cold slow wrapper.
+The public dispatch itself remains outside the formal proof boundary.
 
 `addsub_equal_exponent_exact_path_boundaries` and
-`addsub_near_exponent_exact_path_boundaries` cross all 27 width combinations
-with both operations, all sign pairs, and all three modes. The Decimal128
-bit-width and precision boundary tests additionally cross gaps `0..=38`,
-coefficients immediately around the guard thresholds, both operand orders,
-all signs, cancellation, sums `10^34-1`, `10^34` and `10^34+1`, and extreme
-exponents against the independent BigInt oracle. The large-gap cohort
-reduction test retains the counterexample above.
+`addsub_near_exponent_exact_path_boundaries` cross all 27 width combinations,
+both operations, sign pairs and three modes. The historically named
+`addsub_decimal128_bit_width_alignment_boundaries` remains a valid BigInt
+oracle test over coefficient and gap boundaries, but does not establish a
+bit-width guard in the current implementation. It and the precision/exponent
+tests cover gaps `0..=38`, both operand orders, signs, cancellation, sums
+around `10^34`, and extreme exponents across fast and general paths. The
+large-gap cohort-reduction test retains the counterexample above.
 
 ### Exact addition and subtraction
 
@@ -1108,7 +1102,7 @@ Canonical storage validation establishes `a.c,b.c<10^7`; comparison accepts
 both finite coefficient forms.
 
 For `P=16`, equal exponents use direct coefficient equality with the same
-sign/zero predicate, or exactly signed i128 coefficients for ordering. For
+sign/zero predicate, or exactly signed i64 coefficients for ordering. For
 different exponents, clamp `d=qa-qb` to `g` in `[-16,16]` and use the same
 alignment formulas `A` and `B`. The original difference is in `[-767,767]`.
 Each coefficient and each power fit u64; widening both factors to u128 before
@@ -1548,7 +1542,7 @@ establish the result for all members of each following disjoint path class.
 | Exact/inexact discard; zero/nonzero quotient; preferred shift limited by precision/preference | Euclidean remainder zero is exact; nonzero remainder or sticky is inexact; multiplication headroom decides the unique closest exponent | `narrowing_all_coefficient_exponent_classes_bigint`, `fit_preferred_exponent_clamps_and_extreme_i64_exponents` |
 | Inexact, sign x direction; increment/no increment; carry/no carry | Every strictly positive discarded fraction gives the same directed integer endpoint; only quotient `10^P-1` can carry | `narrowing_largest_finite_and_underflow_boundaries`, `fit_full_integer_domain_boundaries_and_sticky_rational_oracle` |
 | Final exponent below/at/above `qmax`; exact magnitude below/at/above maximum | Range comparison and the quotient/remainder inequalities decide success, `Overflow`, or `Inexact`; direction is applied before the rounded range test | `narrowing_largest_finite_and_underflow_boundaries`, `narrowing_all_coefficient_exponent_classes_bigint` |
-| Addition/subtraction dispatch: gap magnitude `0..=4` or the bit-width guard, preferred exponent in result range and magnitude below `10^P`, or complementary general path | The signed scaled-integer bound covers every coefficient and sign; the accepted aligned result is exactly representable at its preference. Gap/range/capacity failure uses the full general algorithm | `addsub_equal_exponent_exact_path_boundaries`, `addsub_near_exponent_exact_path_boundaries`, `addsub_decimal128_bit_width_alignment_boundaries`, `addsub_decimal128_precision_and_exponent_boundaries`, `addsub_decimal128_exact_sum_after_large_gap_cohort_reduction`, `addsub_all_27_coefficient_gap_sign_classes` |
+| Addition/subtraction dispatch: gap magnitude `0..=4`, preferred exponent in result range and magnitude below `10^P`, or complementary general path | The signed scaled-integer bound covers every coefficient and sign; the accepted aligned result is exactly representable at its preference. Gap/range/capacity failure uses the full general algorithm | `addsub_equal_exponent_exact_path_boundaries`, `addsub_near_exponent_exact_path_boundaries`, `addsub_decimal128_bit_width_alignment_boundaries`, `addsub_decimal128_precision_and_exponent_boundaries`, `addsub_decimal128_exact_sum_after_large_gap_cohort_reduction`, `addsub_all_27_coefficient_gap_sign_classes` |
 | Addition/subtraction: both zero/one zero/nonzero; shared/differing effective signs; cancellation | Effective signs and exact integer arithmetic decide the sign independently of width; zero uses the original preferred exponent clamped by `fit` | `addsub_zero_cohorts_and_self_operations`, `addsub_all_27_coefficient_gap_sign_classes` |
 | Addition/subtraction: `digits(A)+d <=37` or `>37`; retry succeeds/fails; stripped count smaller/equal/larger than gap | Exact bound covers every aligned integer; bounded stripping preserves value and preference; failed retry implies a nonzero remainder and dominance | `addsub_exact_compression_boundary_and_trailing_zeros`, `addsub_all_27_coefficient_gap_sign_classes` |
 | Addition/subtraction compression: same/opposite effective signs; `g<39`/`g>=39`; all destination precisions | The positive fractional tail and lower coefficient bound establish the same directed grid endpoint for every tail in `(0,1)` | `addsub_all_27_coefficient_gap_sign_classes`, `addsub_exact_compression_boundary_and_trailing_zeros` |

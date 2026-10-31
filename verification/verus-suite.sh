@@ -4,7 +4,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERUS_VERSION=0.2026.10.18.7d82994
-EXPECTED_VERIFIED=382
+# Selected-operand ordering adds six proof items; one-sided equality adds two.
+# Removing the widened add window uses two explicit nonlinear identity proofs.
+# Removing its two unused bit-bound lemmas removes six verification items.
+EXPECTED_VERIFIED=386
 
 functions=(
     bidecimal::error::Error::clone
@@ -131,8 +134,6 @@ functions=(
     bidecimal::verus_model::lemma_add_exact_sum
     bidecimal::verus_model::lemma_add_fast_scale
     bidecimal::verus_model::lemma_add_fit_transfer
-    bidecimal::verus_model::lemma_add_bit_scale
-    bidecimal::verus_model::lemma_add_pow10_bit_bound
     bidecimal::verus_model::lemma_add_sum_bound
     bidecimal::verus_model::lemma_add_input
     bidecimal::verus_model::lemma_add_signed_product

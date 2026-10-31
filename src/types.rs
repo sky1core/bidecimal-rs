@@ -508,35 +508,21 @@ macro_rules! decimal_type {
                 b: B,
                 dir: Option<Rounding>,
             ) -> Result<Self, Error> {
-                if <$width>::LAYOUT.digits < 34 && dir.is_some() {
-                    if (a.is_special() | b.is_special())
-                        && let Some(special) = Self::add_sub_special(a, b, SUBTRACT)
-                    {
-                        return Ok(special);
-                    }
-                    let x = a.unpack();
-                    let y = b.unpack();
-                    let value = if let Some(v) = kernel::add_sub::<$width>(x, y, SUBTRACT, dir) {
-                        v
-                    } else {
-                        match add_sub_general::<$width, A, B, SUBTRACT>(x, y, dir) {
-                            Ok(v) => v,
-                            Err(Error::Overflow) => {
-                                return Self::add_sub_overflow::<SUBTRACT>(a, b, dir);
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    };
-                    return Ok(Self(layout::$encode(value)));
-                }
-                let value = if !(a.is_special() | b.is_special())
-                    && let Some(v) = kernel::add_sub::<$width>(a.unpack(), b.unpack(), SUBTRACT, dir)
+                if (a.is_special() | b.is_special())
+                    && let Some(special) = Self::add_sub_special(a, b, SUBTRACT)
                 {
-                    Self(layout::$encode(v))
-                } else {
-                    Self::add_sub_slow::<SUBTRACT, _, _>(a, b, dir)?
-                };
-                Ok(value)
+                    return Ok(special);
+                }
+                let x = a.unpack();
+                let y = b.unpack();
+                if let Some(v) = kernel::add_sub::<$width>(x, y, SUBTRACT, dir) {
+                    return Ok(Self(layout::$encode(v)));
+                }
+                match add_sub_general::<$width, A, B, SUBTRACT>(x, y, dir) {
+                    Ok(v) => Ok(Self(layout::$encode(v))),
+                    Err(Error::Overflow) => Self::add_sub_overflow::<SUBTRACT>(a, b, dir),
+                    Err(e) => Err(e),
+                }
             }
 
             #[cold]
@@ -547,27 +533,6 @@ macro_rules! decimal_type {
                 dir: Option<Rounding>,
             ) -> Result<Self, Error> {
                 Self::overflow(sum_is_negative(a.unpack(), b.unpack(), SUBTRACT), dir)
-            }
-
-            #[cold]
-            #[inline(never)]
-            fn add_sub_slow<const SUBTRACT: bool, A: Operand, B: Operand>(
-                a: A,
-                b: B,
-                dir: Option<Rounding>,
-            ) -> Result<Self, Error> {
-                if (a.is_special() | b.is_special())
-                    && let Some(special) = Self::add_sub_special(a, b, SUBTRACT)
-                {
-                    return Ok(special);
-                }
-                let x = a.unpack();
-                let y = b.unpack();
-                match add_sub_general::<$width, A, B, SUBTRACT>(x, y, dir) {
-                    Ok(v) => Ok(Self(layout::$encode(v))),
-                    Err(Error::Overflow) => Self::overflow(sum_is_negative(x, y, SUBTRACT), dir),
-                    Err(e) => Err(e),
-                }
             }
 
             /// The result when an operand is an infinity or NaN; `None` for finite operands.
@@ -1124,6 +1089,7 @@ macro_rules! decimal_type {
         }
 
         impl PartialOrd for $name {
+            #[inline]
             fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
                 if $identical_bits_shortcut && self.0 == other.0 {
                     return if self.is_nan() { None } else { Some(Ordering::Equal) };
@@ -1233,6 +1199,7 @@ macro_rules! width_pair {
             /// Widens exactly, keeping the sign, coefficient, and exponent. An
             /// infinity stays that infinity, and a NaN gives a quiet NaN with
             /// its sign and payload.
+            #[inline]
             fn from(value: $small) -> Self {
                 const {
                     assert!(
