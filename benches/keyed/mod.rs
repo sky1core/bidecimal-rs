@@ -3,7 +3,7 @@ use bidecimal::{Decimal32, Decimal64, Decimal128};
 use criterion::{BatchSize, Criterion, SamplingMode, Throughput};
 use num_bigint::BigInt;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     fmt,
     hash::{BuildHasherDefault, DefaultHasher, Hash},
     hint::black_box,
@@ -11,7 +11,7 @@ use std::{
 
 pub const COUNT: usize = 8192;
 pub const SEED: u64 = 0x243f_6a88_85a3_08d3;
-pub const SIZES: [usize; 2] = [1024, 65536];
+pub const SIZES: [usize; 1] = [1024];
 const OFFSET: i32 = 40;
 
 pub type Build = BuildHasherDefault<DefaultHasher>;
@@ -227,24 +227,6 @@ pub trait Container<K>: Clone {
     fn take(&mut self, key: &K) -> bool;
     fn size(&self) -> usize;
 }
-impl<K: Ord + Clone> Container<K> for BTreeSet<K> {
-    const NAME: &'static str = "btreeset";
-    fn empty() -> Self {
-        Self::new()
-    }
-    fn put(&mut self, key: K, _: u32) {
-        self.insert(key);
-    }
-    fn find(&self, key: &K) -> Option<u32> {
-        self.contains(key).then_some(0)
-    }
-    fn take(&mut self, key: &K) -> bool {
-        self.remove(key)
-    }
-    fn size(&self) -> usize {
-        self.len()
-    }
-}
 impl<K: Ord + Clone> Container<K> for BTreeMap<K, u32> {
     const NAME: &'static str = "btreemap";
     fn empty() -> Self {
@@ -276,24 +258,6 @@ impl<K: Eq + Hash + Clone> Container<K> for HashSet<K, Build> {
     }
     fn take(&mut self, key: &K) -> bool {
         self.remove(key)
-    }
-    fn size(&self) -> usize {
-        self.len()
-    }
-}
-impl<K: Eq + Hash + Clone> Container<K> for HashMap<K, u32, Build> {
-    const NAME: &'static str = "hashmap";
-    fn empty() -> Self {
-        Self::with_hasher(Build::default())
-    }
-    fn put(&mut self, key: K, index: u32) {
-        self.insert(key, index);
-    }
-    fn find(&self, key: &K) -> Option<u32> {
-        self.get(key).copied()
-    }
-    fn take(&mut self, key: &K) -> bool {
-        self.remove(key).is_some()
     }
     fn size(&self) -> usize {
         self.len()

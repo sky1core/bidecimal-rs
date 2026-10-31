@@ -12,7 +12,7 @@ reference measurement and not part of the specification.
 | Library | The crate's `src/` in the working tree, as a path dependency; the report records the commit and whether the working tree is clean; no benchmark-specific code |
 | Toolchain | Exact release from the crate's `rust-toolchain.toml`; the runner checks that the `cargo` and `rustc` on PATH report it and builds with that release |
 | Dependencies | rust_decimal =1.43.0 (default features), criterion =0.8.2 (no default features, cargo_bench_support), num-bigint =0.5.1 |
-| Profile | bench/release: opt-level=3, codegen-units=1, lto=fat, debug=false; no target-cpu override |
+| Profile | Primary (default): bench, Rust default release settings, opt-level=3, lto=false, codegen-units=16, debug=false. Secondary: bench-fat-lto, inherits bench with lto="fat", codegen-units=1. No target-cpu override; selected only with --profile, recorded in metadata and report |
 | Sessions | 3 interleaved; one paired function per comparison path; each iteration times the full bidecimal set and full rust_decimal set back to back with separate timers; every sample (iter_custom call) starts from the session's configured order and alternates the order per iteration; sessions 1 and 3 start with bidecimal, session 2 with rust_decimal |
 | Sampling | Every paired and wide_* function: Flat sampling, 2 s warm-up, 5 s measurement target, 100 samples; criterion selects a constant iteration count per sample |
 | Statistics | Per side and sample: aggregated side nanoseconds / iterations / set size (ns per element); median, minimum, nearest-rank p95 (95th of 100); no outlier removal |
@@ -85,13 +85,19 @@ rustup run "$channel" rustc --edition 2024 --test perf.rs -o target/perf-self-te
 target/perf-self-tests
 rustup run "$channel" cargo bench --offline --locked --bench paths -- --test
 rustup run "$channel" rustc --edition 2024 perf.rs -o target/perf-runner
-target/perf-runner target/perf-run --max-wait-seconds 120
+target/perf-runner target/perf-run --max-wait-seconds 120 --profile bench
+# Secondary measurement, in a separate output directory:
+target/perf-runner target/perf-fat-lto-run --max-wait-seconds 120 --profile bench-fat-lto
 ```
 
 The `cargo` and `rustc` first on PATH must be the pinned release.
+The runner defaults to `--profile bench`; default release results are primary.
+For the secondary preflight, add `--profile bench-fat-lto` to the `cargo bench`
+command. Build environment overrides, including `CARGO_PROFILE_*`, remain
+refused for either profile.
 
 | Self-test | Coverage |
 |---|---|
 | perf_harness | The partition predicate against an enumeration of E = -28..=0 on 27/28/29 digits, E = -29/-28/0/1, trailing zeros, zero, both signs, and 20,000 random values; expected results and inside checks; the BID decoder on boundary encodings of all widths (sign, both combination-field forms, exponent, coefficient); workload digit and cohort coverage |
-| perf-self-tests | Paired median/min/nearest-rank p95/ratio and diagnostics on synthetic raw JSON; preliminary boundary; iteration identity, time sum differing from the criterion sample time, invalid samples; lockstep 1.7x half-step without instability; ratio half-steps at exactly ±10%, the adjacent representable values just below and above the boundary; unequal slow fractions with stable ratio without instability; ratio half-change and nearest-rank IQR/median; paired file aggregation and wide_* criterion estimate mismatch; refusal of a toolchain mismatch, of each refused build environment variable and of a Cargo configuration file in the working directory, an ancestor directory or the Cargo home; Cargo configuration probing order, Cargo home resolution and metadata check rows naming every checked variable and file; load wait and timeout, CLI default, fixture cleanup |
+| perf-self-tests | Paired median/min/nearest-rank p95/ratio and diagnostics on synthetic raw JSON; preliminary boundary; iteration identity, time sum differing from the criterion sample time, invalid samples; lockstep 1.7x half-step without instability; ratio half-steps at exactly ±10%, the adjacent representable values just below and above the boundary; unequal slow fractions with stable ratio without instability; ratio half-change and nearest-rank IQR/median; paired file aggregation and wide_* criterion estimate mismatch; refusal of a toolchain mismatch, of each refused build environment variable and of a Cargo configuration file in the working directory, an ancestor directory or the Cargo home; Cargo configuration probing order, Cargo home resolution and metadata check rows naming every checked variable and file; load wait and timeout, CLI defaults and profile selection/refusal, fixture cleanup |
 | paths --test | criterion test mode; preflight of the comparison and outside sets of every path |

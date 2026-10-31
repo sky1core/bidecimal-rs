@@ -487,7 +487,7 @@ fn stats(
     Ok((path, vec![(implementation, summary)], None))
 }
 
-fn benchmark(root: &Path, args: &[&str], baseline_first: bool) -> Result<()> {
+fn benchmark(root: &Path, profile: &str, args: &[&str], baseline_first: bool) -> Result<()> {
     let start = Instant::now();
     let pinned = pinned_channel()?;
     let compiler = raw_command("rustup", &["which", "--toolchain", &pinned, "rustc"])?;
@@ -503,6 +503,8 @@ fn benchmark(root: &Path, args: &[&str], baseline_first: bool) -> Result<()> {
             "bench",
             "--offline",
             "--locked",
+            "--profile",
+            profile,
             "--bench",
             "paths",
             "--",
@@ -576,22 +578,34 @@ fn verify_toolchain() -> Result<()> {
 const DEFAULT_MAX_WAIT_SECONDS: u64 = 120;
 const LOAD_POLL_SECONDS: u64 = 5;
 
-fn options(args: impl IntoIterator<Item = String>) -> Result<(PathBuf, Duration)> {
+fn options(args: impl IntoIterator<Item = String>) -> Result<(PathBuf, Duration, &'static str)> {
     let mut args = args.into_iter();
     let root = PathBuf::from(args.next().ok_or(
-        "usage: perf-runner NEW_OUTPUT_DIRECTORY [--max-wait-seconds SECONDS] (default: 120)",
+        "usage: perf-runner NEW_OUTPUT_DIRECTORY [--max-wait-seconds SECONDS] [--profile bench|bench-fat-lto] (defaults: 120 seconds, bench)",
     )?);
-    let seconds = match args.next() {
-        None => DEFAULT_MAX_WAIT_SECONDS,
-        Some(flag) if flag == "--max-wait-seconds" => {
-            args.next().ok_or("missing maximum wait")?.parse()?
+    let mut seconds = DEFAULT_MAX_WAIT_SECONDS;
+    let mut profile = "bench";
+    let mut seen_wait = false;
+    let mut seen_profile = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--max-wait-seconds" if !seen_wait => {
+                seconds = args.next().ok_or("missing maximum wait")?.parse()?;
+                seen_wait = true;
+            }
+            "--profile" if !seen_profile => {
+                profile = match args.next().as_deref() {
+                    Some("bench") => "bench",
+                    Some("bench-fat-lto") => "bench-fat-lto",
+                    Some(_) => return Err("profile must be bench or bench-fat-lto".into()),
+                    None => return Err("missing profile".into()),
+                };
+                seen_profile = true;
+            }
+            _ => return Err(format!("unexpected or repeated option: {flag}").into()),
         }
-        Some(_) => return Err("expected --max-wait-seconds".into()),
-    };
-    if args.next().is_some() {
-        return Err("too many arguments".into());
     }
-    Ok((root, Duration::from_secs(seconds)))
+    Ok((root, Duration::from_secs(seconds), profile))
 }
 
 const REJECTED_VARIABLES: [&str; 8] = [
@@ -730,7 +744,7 @@ fn wait_for_load(
 }
 
 fn main() -> Result<()> {
-    let (root, maximum_wait) = options(env::args().skip(1))?;
+    let (root, maximum_wait, profile) = options(env::args().skip(1))?;
     check_build_environment()?;
     verify_toolchain()?;
     if root.exists() {
@@ -756,7 +770,7 @@ fn main() -> Result<()> {
     };
     let source = source_id()?;
     let metadata = format!(
-        "| Field | Value |\n|---|---|\n| rustc | {} |\n| cargo | {} |\n| Commit | {} |\n| Working tree | {} |\n| Source fingerprint | {source} |\n| CPU | {cpu} |\n| OS | {} |\n{}",
+        "| Field | Value |\n|---|---|\n| rustc | {} |\n| cargo | {} |\n| Commit | {} |\n| Working tree | {} |\n| Source fingerprint | {source} |\n| Profile | {profile} |\n| CPU | {cpu} |\n| OS | {} |\n{}",
         command("rustc", &["-V"])?,
         command("cargo", &["-V"])?,
         command("git", &["rev-parse", "HEAD"])?,
@@ -781,7 +795,7 @@ fn main() -> Result<()> {
     println!("{metadata}");
     let check = root.join("preflight");
     fs::create_dir(&check)?;
-    benchmark(&check, &["--test"], false)?;
+    benchmark(&check, profile, &["--test"], false)?;
     let mut report = metadata;
     let preflight = fs::read_to_string(check.join("full-output.txt"))?;
     report.push_str("\n```text\n");
@@ -818,7 +832,7 @@ fn main() -> Result<()> {
             std::thread::sleep,
         )?;
         let date = command("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"])?;
-        benchmark(&dir, &["--noplot"], session == 2)?;
+        benchmark(&dir, profile, &["--noplot"], session == 2)?;
         let end_load = load_average(&os)?;
         let log = fs::read_to_string(dir.join("full-output.txt"))?;
         if workload_lines(&log) != checks {
@@ -1326,9 +1340,25 @@ mod tests {
     }
 
     #[test]
-    fn command_line_wait_is_explicit_or_documented_default() {
+    fn command_line_options_are_explicit_or_documented_defaults() {
         let parse = |args: &[&str]| options(args.iter().map(|s| (*s).to_owned()));
         assert_eq!(parse(&["output"]).unwrap().1, Duration::from_secs(120));
+        assert_eq!(parse(&["output"]).unwrap().2, "bench");
+        for profile in ["bench", "bench-fat-lto"] {
+            assert_eq!(
+                parse(&["output", "--profile", profile]).unwrap(),
+                (PathBuf::from("output"), Duration::from_secs(120), profile)
+            );
+            for args in [
+                vec!["output", "--profile", profile, "--max-wait-seconds", "0"],
+                vec!["output", "--max-wait-seconds", "0", "--profile", profile],
+            ] {
+                assert_eq!(
+                    parse(&args).unwrap(),
+                    (PathBuf::from("output"), Duration::ZERO, profile)
+                );
+            }
+        }
         assert_eq!(
             parse(&["output", "--max-wait-seconds", "0"]).unwrap().1,
             Duration::ZERO
@@ -1339,6 +1369,17 @@ mod tests {
             vec!["output", "--max-wait-seconds", "-1"],
             vec!["output", "--other", "120"],
             vec!["output", "--max-wait-seconds", "1", "extra"],
+            vec![
+                "output",
+                "--max-wait-seconds",
+                "1",
+                "--max-wait-seconds",
+                "2",
+            ],
+            vec!["output", "--profile"],
+            vec!["output", "--profile", "release"],
+            vec!["output", "--profile", ""],
+            vec!["output", "--profile", "bench", "--profile", "bench-fat-lto"],
         ] {
             assert!(parse(&args).is_err());
         }
@@ -1366,6 +1407,8 @@ mod tests {
             "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
             "CARGO_PROFILE_RELEASE_LTO",
             "CARGO_PROFILE_BENCH_OPT_LEVEL",
+            "CARGO_PROFILE_BENCH_LTO",
+            "CARGO_PROFILE_BENCH_FAT_LTO_CODEGEN_UNITS",
             "CARGO_PROFILE_BENCH_BUILD_OVERRIDE_OPT_LEVEL",
             "CARGO_ALIAS_BENCH",
             "CARGO_REGISTRIES_CRATES_IO_PROTOCOL",

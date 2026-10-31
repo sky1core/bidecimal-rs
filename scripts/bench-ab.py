@@ -24,6 +24,10 @@ jumps to the 128-bit division helpers, other rip-relative references to them
 on x86-64, and indirect calls and jumps whose target is not resolved are
 compared; the complete and the reduced disassembly of both sides are kept.
 
+With `--filter`, only the Criterion benchmarks whose IDs match the regular
+expression are listed and timed; every selected target must have at least one
+match. The filter is recorded in the report.
+
 The `instructions` target counts the instructions of each benchmark once per
 side under Valgrind Cachegrind through Gungraun, which needs Linux, Valgrind,
 and `gungraun-runner` of the version in the lock file.
@@ -43,6 +47,7 @@ import statistics
 import subprocess
 import sys
 import tarfile
+import tomllib
 from pathlib import Path
 
 TIMED = ("finite", "keys", "special", "ops")
@@ -58,6 +63,23 @@ COMPILER_OVERRIDES = (
     "RUSTC_WORKSPACE_WRAPPER",
     "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
 )
+ALLOWED_CARGO_VARIABLES = {
+    "CARGO_HOME", "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR", "CARGO_BUILD_BUILD_DIR",
+    "CARGO_LOG", "CARGO_CACHE_RUSTC_INFO", "CARGO_CACHE_AUTO_CLEAN_FREQUENCY",
+    "CARGO_FUTURE_INCOMPAT_REPORT_FREQUENCY",
+}
+ALLOWED_CARGO_PREFIXES = (
+    "CARGO_TERM_", "CARGO_HTTP_", "CARGO_NET_", "CARGO_ALIAS_", "CARGO_CREDENTIAL_ALIAS_", "CARGO_REGISTRY_",
+    "CARGO_REGISTRIES_",
+)
+ALLOWED_CONFIG_TABLES = {
+    "cache", "future-incompat-report", "http", "net", "term", "alias", "credential-alias", "registry", "registries",
+    "source",
+}
+ALLOWED_CONFIG_BUILD_KEYS = {"build-dir", "target-dir"}
+BUILD_OVERRIDES = {
+    *COMPILER_OVERRIDES, "CARGO", "RUSTFLAGS", "RUSTDOCFLAGS", "RUSTDOC", "RUSTC_BOOTSTRAP",
+}
 API_MISMATCH = {
     "E0034", "E0061", "E0063", "E0107", "E0277", "E0282", "E0283", "E0308", "E0369", "E0412", "E0423", "E0425",
     "E0432", "E0433", "E0560", "E0599", "E0600", "E0603", "E0609", "E0616", "E0618", "E0624",
@@ -88,6 +110,47 @@ def output(command, cwd=None, env=None):
     return result.stdout.strip()
 
 
+def check_build_environment(working_directories):
+    """Keep the manifest profile reported below equal to the effective build.
+
+    RUSTC remains an explicit compiler selector; its resolved version is reported.
+    Empty override variables are rejected as well as nonempty ones.
+    """
+    rejected = sorted(
+        name for name in os.environ
+        if name in BUILD_OVERRIDES or (
+            name.startswith("CARGO_") and name not in ALLOWED_CARGO_VARIABLES
+            and not name.startswith(ALLOWED_CARGO_PREFIXES)
+        )
+    )
+    if rejected:
+        fail(f"unset {', '.join(rejected)}: build overrides would invalidate the reported profile")
+    configs = set()
+    for directory in working_directories:
+        directory = Path(directory).absolute()
+        # Check both lexical and resolved ancestors (including symlink paths).
+        for root in (directory, directory.resolve()):
+            for ancestor in (root, *root.parents):
+                configs.update(ancestor / ".cargo" / name for name in ("config", "config.toml"))
+        home = os.environ.get("CARGO_HOME")
+        cargo_home = directory / home if home else Path.home() / ".cargo"
+        configs.update(cargo_home / name for name in ("config", "config.toml"))
+    for config in sorted(configs):
+        try:
+            settings = tomllib.loads(config.read_text())
+        except FileNotFoundError:
+            continue
+        except (OSError, tomllib.TOMLDecodeError) as error:
+            fail(f"cannot check Cargo configuration {config}: {error}")
+        rejected = sorted(
+            [name for name in settings if name not in ALLOWED_CONFIG_TABLES | {"build"}]
+            + [f"build.{name}" for name in settings.get("build", {}) if name not in ALLOWED_CONFIG_BUILD_KEYS]
+        )
+        if rejected:
+            fail(f"Cargo configuration {config} sets {', '.join(rejected)}: "
+                 "build settings would invalidate the reported profile")
+
+
 def commit(rev):
     return output(["git", "rev-parse", "--verify", f"{rev}^{{commit}}"])
 
@@ -112,17 +175,34 @@ def in_benchmark_code(diagnostic, tree):
     )
 
 
-def build(tree, target, jobs, compiler, log):
+def profile_settings(manifest, name):
+    """The settings of profile `name` and of the profiles it inherits, as
+    written in `manifest`, so that a report shows what the profile name meant
+    in the harness commit."""
+    profiles = tomllib.loads(manifest.read_text()).get("profile", {})
+    if name not in profiles:
+        return f"{name} (not defined in Cargo.toml; Cargo's built-in settings)"
+    chain = []
+    while name in profiles:
+        settings = profiles[name]
+        chain.append(f"{name} ({', '.join(f'{key}={json.dumps(value)}' for key, value in settings.items())})")
+        name = settings.get("inherits")
+    return "; ".join(chain)
+
+
+def build(tree, target, profile, jobs, compiler, log):
     """Builds `target` in `tree` with `compiler` and returns its executable,
     or None when the library builds and only the benchmark code fails, with
     rustc errors in the benchmark sources of the kinds in `API_MISMATCH`: the
     benchmark uses an item the library lacks or has with another signature or
     visibility. Any other failure exits. The build output goes to `log`."""
-    selection = COUNTED_CARGO if target == COUNTED else ["--bench", target]
+    check_build_environment([tree])
+    selection = COUNTED_CARGO if target == COUNTED else ["--profile", profile, "--bench", target]
     command = ["cargo", "bench", "--locked", "--no-run", "--message-format=json", "--jobs", str(jobs), *selection]
     env = {
         **os.environ,
         "CARGO_TARGET_DIR": str(tree / "target"),
+        "CARGO_BUILD_BUILD_DIR": str(tree / "target"),
         "RUSTC": str(compiler),
         "RUSTC_WRAPPER": "",
         "RUSTC_WORKSPACE_WRAPPER": "",
@@ -160,14 +240,17 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def listed_titles(executable, tree, *arguments):
-    """The titles of the benchmarks that `executable` defines: Criterion
-    titles, or `module_path::id` for the instruction benchmarks. Listing a
-    Criterion target also runs every benchmark's result check."""
-    lines = output([executable, "--bench", "--list", *arguments], cwd=tree).splitlines()
+def listed_titles(executable, tree, *arguments, filter=None):
+    """The titles of the benchmarks that `executable` defines, or with
+    `filter` those that match it: Criterion titles, or `module_path::id` for
+    the instruction benchmarks. Listing a Criterion target also runs every
+    benchmark's result check."""
+    selection = [filter] if filter is not None else []
+    lines = output([executable, "--bench", "--list", *arguments, *selection], cwd=tree).splitlines()
     titles = {line.removesuffix(": benchmark") for line in lines if line.endswith(": benchmark")}
     if not titles:
-        fail(f"{executable} lists no benchmarks")
+        matching = f" matching --filter {filter!r}" if filter is not None else ""
+        fail(f"{executable} lists no benchmarks{matching}")
     return titles
 
 
@@ -407,6 +490,15 @@ def main():
         choices=[*TIMED, COUNTED],
         help=f"benchmark target, repeatable (default: the Criterion targets {', '.join(TIMED)})",
     )
+    parser.add_argument(
+        "--profile", choices=["bench", "bench-fat-lto"], default="bench",
+        help="build profile for timed targets (default: bench); instructions always use bench-instructions",
+    )
+    parser.add_argument(
+        "--filter",
+        help="regular expression passed to Criterion: list and time only the matching benchmarks; "
+        "every selected target must have a match (not with instructions)",
+    )
     parser.add_argument("--jobs", type=int, default=2, help="parallel build jobs (default: 2)")
     parser.add_argument(
         "--analyze-codegen",
@@ -424,12 +516,14 @@ def main():
         if directory.exists():
             fail(f"{directory} already exists; use a new directory")
     targets = args.bench or list(TIMED)
+    if COUNTED in targets and args.filter is not None:
+        fail("--filter selects Criterion benchmarks and cannot be used with instructions")
+    if COUNTED in targets and args.profile == "bench-fat-lto":
+        fail("--profile bench-fat-lto cannot be used with instructions; instructions always use bench-instructions")
     settings = sorted(name for name in os.environ if name.startswith("GUNGRAUN_"))
     if COUNTED in targets and settings:
         fail(f"unset {', '.join(settings)}: they change which instruction benchmarks run and what they count")
-    overrides = [name for name in COMPILER_OVERRIDES if os.environ.get(name)]
-    if overrides:
-        fail(f"unset {', '.join(overrides)}; give the compiler with RUSTC")
+    check_build_environment([args.work / "base", args.work / "candidate"])
     program = os.environ.get("RUSTC", "rustc")
     found = shutil.which(program)
     if found is None:
@@ -458,7 +552,7 @@ def main():
     for target in targets:
         for side in ("candidate", "base"):
             log = logs / f"build-{side}-{target}.log"
-            executable = build(trees[side], target, args.jobs, compiler, log)
+            executable = build(trees[side], target, args.profile, args.jobs, compiler, log)
             if executable is None and side == "candidate":
                 fail(f"the candidate does not build {target}; see {log.name}")
             if executable is None:
@@ -474,7 +568,10 @@ def main():
     for target in targets:
         arguments = ("--format", "terse") if target == COUNTED else ()
         sides = SIDES if target in compared else ("candidate",)
-        listed = {side: listed_titles(executables[side][target], trees[side], *arguments) for side in sides}
+        listed = {
+            side: listed_titles(executables[side][target], trees[side], *arguments, filter=args.filter)
+            for side in sides
+        }
         if target in compared and listed["base"] != listed["candidate"]:
             fail(f"{target}: base and candidate list different benchmarks")
         titles[target] = listed["candidate"]
@@ -488,6 +585,13 @@ def main():
         "candidate": revs["candidate"],
         "harness": harness,
         "targets": targets,
+        "filter": args.filter,
+        "build_environment": "profile/flag/target overrides checked absent from the environment and Cargo "
+        "configuration files before each build",
+        "timed_profile": profile_settings(trees["candidate"] / "Cargo.toml", args.profile) if timed else None,
+        "instructions_profile": profile_settings(trees["candidate"] / "Cargo.toml", "bench-instructions")
+        if COUNTED in compared
+        else None,
         "not_comparable": not_comparable,
         "executables_sha256": {
             target: {side: sha256(executables[side][target]) for side in SIDES} for target in compared
@@ -507,6 +611,10 @@ def main():
         f"| Base | `{revs['base']}` |",
         f"| Candidate | `{revs['candidate']}` |",
         f"| Harness | `{harness}` |",
+        *([f"| Filter | `{args.filter}` |"] if args.filter is not None else []),
+        f"| Build environment | {environment['build_environment']} |",
+        *([f"| Timed profile | {environment['timed_profile']} |"] if timed else []),
+        *([f"| Instructions profile | {environment['instructions_profile']} |"] if COUNTED in compared else []),
         f"| OS | {environment['os']} |",
         f"| rustc | {environment['rustc']}, LLVM {rustc.get('LLVM version', 'not reported')} |",
         f"| Load average at start | {' '.join(map(str, environment['load_average_at_start']))} |",
@@ -624,7 +732,13 @@ def main():
                     order.append(f"{target}/{baseline}")
                     with open(logs / f"{target}-{baseline}.log", "w") as log:
                         run = subprocess.run(
-                            [executables[side][target], "--bench", "--save-baseline", baseline],
+                            [
+                                executables[side][target],
+                                "--bench",
+                                "--save-baseline",
+                                baseline,
+                                *([args.filter] if args.filter is not None else []),
+                            ],
                             cwd=trees[side],
                             env={**os.environ, "CRITERION_HOME": str(home / target)},
                             stdout=log,

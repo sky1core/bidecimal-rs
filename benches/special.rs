@@ -1,7 +1,7 @@
 use bidecimal::{Decimal32, Decimal64, Decimal128, Error, OrderedDecimal};
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     hash::{BuildHasher, Hash},
     time::Duration,
 };
@@ -21,16 +21,8 @@ mod support;
 
 const CONTAINER_SIZE: usize = 1024;
 const CONTAINER_SPECIALS: usize = 72;
-/// Name, percentage of operand slots holding NaN or an infinity, and whether
-/// those slots form one leading block instead of being scattered.
-const MIXES: [(&str, u64, bool); 6] = [
-    ("p0", 0, false),
-    ("p1", 1, false),
-    ("p10", 10, false),
-    ("p50", 50, false),
-    ("p100", 100, false),
-    ("p10_block", 10, true),
-];
+/// Name and percentage of operand slots holding NaN or an infinity.
+const MIXES: [(&str, u64); 3] = [("p0", 0), ("p10", 10), ("p100", 100)];
 
 trait Special: Number {
     fn specials() -> Vec<Self>;
@@ -141,14 +133,9 @@ where
     let specials = T::specials();
     let build = Build::default();
     let hash = |v: T| build.hash_one(OrderedDecimal(v));
-    for (name, percent, block) in MIXES {
+    for (name, percent) in MIXES {
         let slot = |i: usize, v: T| {
-            let replaced = if block {
-                (i as u64) * 100 < 2 * COUNT as u64 * percent
-            } else {
-                draws[i] % 100 < percent
-            };
-            if replaced {
+            if draws[i] % 100 < percent {
                 specials[((draws[i] >> 32) % specials.len() as u64) as usize]
             } else {
                 v
@@ -262,10 +249,8 @@ where
     assert!(last.is_some_and(|v| v.nan()), "last {last:?}");
     let finite = map.keys().filter(|k| k.0.finite()).count();
     assert_eq!(finite, CONTAINER_SIZE, "finite keys");
-    special_container::<T, BTreeSet<_>>(c, &sequence);
     special_container::<T, BTreeMap<_, u32>>(c, &sequence);
     special_container::<T, HashSet<_, Build>>(c, &sequence);
-    special_container::<T, HashMap<_, u32, Build>>(c, &sequence);
 }
 
 fn special(c: &mut Criterion) {
@@ -279,6 +264,7 @@ fn special(c: &mut Criterion) {
 }
 
 criterion_group! { name = benches; config = Criterion::default()
-.warm_up_time(Duration::from_secs(1)).measurement_time(Duration::from_secs(2)).sample_size(100);
+.warm_up_time(Duration::from_millis(500)).measurement_time(Duration::from_secs(1)).sample_size(100)
+.nresamples(2000);
 targets = special }
 criterion_main!(benches);

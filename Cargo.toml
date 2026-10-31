@@ -29,15 +29,18 @@ overflow-checks = true
 
 [profile.release]
 opt-level = 3
-codegen-units = 1
-lto = "fat"
 debug = false
 
 [profile.bench]
 opt-level = 3
-codegen-units = 1
-lto = "fat"
+lto = false
+codegen-units = 16
 debug = false
+
+[profile.bench-fat-lto]
+inherits = "bench"
+lto = "fat"
+codegen-units = 1
 
 [profile.bench-instructions]
 inherits = "bench"

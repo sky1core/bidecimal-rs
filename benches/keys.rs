@@ -2,7 +2,7 @@ use bidecimal::{Decimal32, Decimal64, Decimal128, OrderedDecimal};
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     hash::{BuildHasher, Hash},
     time::Duration,
 };
@@ -95,10 +95,8 @@ where
     for n in SIZES {
         let w = Workload::<T>::new(rng, n).map(key);
         assert_ordered(T::NAME, &w);
-        container::<_, BTreeSet<_>>(c, T::NAME, &w);
         container::<_, BTreeMap<_, u32>>(c, T::NAME, &w);
         container::<_, HashSet<_, Build>>(c, T::NAME, &w);
-        container::<_, HashMap<_, u32, Build>>(c, T::NAME, &w);
     }
 }
 
@@ -134,6 +132,7 @@ fn keys(c: &mut Criterion) {
 }
 
 criterion_group! { name = benches; config = Criterion::default()
-.warm_up_time(Duration::from_secs(1)).measurement_time(Duration::from_secs(2)).sample_size(100);
+.warm_up_time(Duration::from_millis(500)).measurement_time(Duration::from_secs(1)).sample_size(100)
+.nresamples(2000);
 targets = keys }
 criterion_main!(benches);

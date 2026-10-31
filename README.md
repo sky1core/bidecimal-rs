@@ -104,6 +104,20 @@ finite, keys, and ops benchmarks check their inputs and results against an
 exact reference, down to the sign, coefficient, and exponent of each decimal,
 and the special benchmark checks the comparisons and result
 classes of operations with an infinity or NaN operand against `f64`.
+Each Criterion benchmark warms up for 0.5 s, then takes 100 samples over
+about 1 s, with 2,000 bootstrap resamples for Criterion's own intervals; the
+median that `scripts/bench-ab.py` compares is the sample median and does not
+depend on the resample count. The keys benchmark measures `BTreeMap` and `HashSet`
+with 1,024 keys; the special benchmark measures the same two containers on a
+sequence of 1,024 finite keys and 72 infinities and NaNs, and its operation benchmarks
+replace no operand slot, each slot with probability 0.1, or every slot with a
+NaN or an infinity.
+
+The primary profile is `bench`: Rust's default release settings, stated
+explicitly as opt-level=3, lto=false, codegen-units=16, debug=false. Library
+profile settings do not apply to dependent projects. The secondary
+`bench-fat-lto` profile inherits `bench` with lto="fat" and codegen-units=1.
+Pull request performance judgment uses the default release profile first.
 
 `bench-instructions/benches/instructions.rs` counts the executed instructions
 of key hashing, key comparison, Decimal128 multiplication and division
@@ -114,7 +128,8 @@ It runs on Linux with Valgrind 3.22 or later and `gungraun-runner` of the
 version in `Cargo.lock`, and building it needs libclang; Gungraun turns off address space layout
 randomization with `setarch -R`, which a container's default seccomp profile
 refuses. An instruction count is not a time: it shows which code a change adds
-or removes, not how long that code takes.
+or removes, not how long that code takes. It uses `bench-instructions`, which
+inherits `bench` and enables debug information.
 
 `scripts/bench-ab.py` (Python 3.12 or later) compares two commits on one
 machine: it builds both with the benchmark code of one commit, runs every
@@ -149,13 +164,55 @@ are kept in `codegen/`.
 
 ```sh
 python3 scripts/bench-ab.py --base main --candidate HEAD --work ../bench-trees --out ../bench-out
+python3 scripts/bench-ab.py --profile bench-fat-lto --base main --candidate HEAD --work ../bench-fat-trees --out ../bench-fat-out
 ```
 
+`--profile` selects the timed profile and defaults to `bench`; the summary
+and `results.json` record the profile with its settings as written in the
+harness commit's `Cargo.toml`. Combining `--profile bench-fat-lto` with
+`--bench instructions` is rejected.
+
+The runner rejects build-profile, compiler-flag and target overrides from the
+environment, including empty variables, and from Cargo configuration files in
+either build tree (`--work` `base` and `candidate`), its ancestors, or its
+Cargo home. This keeps the manifest profile recorded in the report consistent
+with the build. Cache, transport, logging, alias, registry and source
+replacement settings are allowed; a configuration file may set only
+`build.build-dir`, `build.target-dir`, and the `alias`, `cache`,
+`credential-alias`, `future-incompat-report`, `http`, `net`, `registries`,
+`registry`, `source` and `term` tables. Each build tree gets its own build
+directory. `RUSTC` remains an explicit compiler selector; the resolved compiler
+and its version are recorded. The checks run before setup and again before
+every build. Run `python3 scripts/test_bench_ab.py` for the guard regression
+tests (no compilation or timing required).
+
+`--filter <regex>` passes a regular expression to Criterion, so that only the
+benchmarks whose IDs, such as `keycmp_d64_same/set`, match it are listed and
+timed; the summary and
+`results.json` record the filter. A selected target with no matching
+benchmark fails the comparison, and `--filter` with `--bench instructions` is
+rejected. Without `--bench`, every target must match, so a filter usually goes
+with the `--bench` targets that contain the benchmarks.
+
+```sh
+python3 scripts/bench-ab.py --bench keys --filter '^keycmp_' --base main --candidate HEAD --work ../bench-keycmp-trees --out ../bench-keycmp-out
+```
+
+During development, compare only the benchmarks of the changed paths with
+`--filter`. For a pull request's performance judgment, run the full
+comparison once per platform on the final candidate; a ratio within the
+spread of an A/A comparison on the same machine is noise. On some machines
+the time of a short benchmark varies between processes more than two rounds
+average out; on an Apple M1 Max, the standard deviation of the log time over
+six runs of one executable reached 21 percent for a comparison benchmark.
+Before judging a benchmark whose ratio is outside the A/A spread, compare it
+again with `--filter` and more rounds, such as `--rounds 6`.
+
 For pull requests that change the library or the benchmarks, the benchmark
-workflow compares the times and the code of the `ops` and `finite` targets
-and the instruction counts on x86-64 and ARM64 Linux; a manual run takes the
-timed targets as an input. A slower result or a larger count is reported, not a
-failed check.
+workflow compares the times and the code of the `ops`, `finite`, `keys`, and
+`special` targets and the instruction counts on x86-64 and ARM64 Linux; a
+manual run takes the timed targets and profile as inputs (default profile:
+`bench`). A slower result or a larger count is reported, not a failed check.
 
 ## License
 
