@@ -442,6 +442,7 @@ pub(crate) fn fit<W: Width>(
     clippy::arithmetic_side_effects,
     reason = "finite decoded coefficients < 10^34; ordered i32 exponent difference fits i64; after the digit guard d <= 34 and scaled coefficient < 10^35 < 2^127"
 )]
+#[cfg(kani)]
 fn cmp_mag(a: Unpacked, b: Unpacked) -> Ordering {
     if a.coeff == 0 || b.coeff == 0 {
         return a.coeff.cmp(&b.coeff);
@@ -460,9 +461,161 @@ fn cmp_mag(a: Unpacked, b: Unpacked) -> Ordering {
 #[inline]
 #[expect(
     clippy::arithmetic_side_effects,
-    reason = "P is 7/16/34 and both coefficients < 10^P; exponent difference is in -12287..=12287; guarded scaling has powers <= 38-P and coefficients < 10^38 < 2^127"
+    reason = "canonical Decimal32 coefficients < 10^7 and exponents in -101..=90; clamping the gap to -7..=7 bounds both powers by 10^7 and products below 10^14 < 2^63"
+)]
+fn clamped_magnitudes_32(a: Unpacked, b: Unpacked) -> (u64, u64) {
+    let gap = (a.exp - b.exp).clamp(-7, 7);
+    (
+        (a.coeff as u64) * pow10_64(gap.max(0) as u32),
+        (b.coeff as u64) * pow10_64((-gap).max(0) as u32),
+    )
+}
+
+#[inline]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "canonical Decimal64 coefficients < 10^16 and exponents in -398..=369; clamping the gap to -16..=16 bounds both u64 powers by 10^16 and widening products below 10^32 < 2^107"
+)]
+#[cfg_attr(verus_keep_ghost, verus_spec(ret =>
+    requires
+        a.coeff < 10000000000000000int, b.coeff < 10000000000000000int,
+        -398 <= a.exp <= 369, -398 <= b.exp <= 369,
+    ensures
+        ret.0 < 100000000000000000000000000000000int,
+        ret.1 < 100000000000000000000000000000000int,
+        ret.0 == 0 <==> a.coeff == 0,
+        ret.1 == 0 <==> b.coeff == 0,
+        crate::verus_model::same_order(
+            ret.0 as int, ret.1 as int,
+            a.coeff * vstd::arithmetic::power::pow(10, (a.exp - crate::verus_model::min_exp(a, b)) as nat),
+            b.coeff * vstd::arithmetic::power::pow(10, (b.exp - crate::verus_model::min_exp(a, b)) as nat)),
+))]
+fn clamped_magnitudes_64(a: Unpacked, b: Unpacked) -> (u128, u128) {
+    let gap = (a.exp - b.exp).clamp(-16, 16);
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        crate::verus_model::lemma_comparison_scale_64(a.coeff as int, (if gap > 0 { gap as int } else { 0 }) as nat);
+        crate::verus_model::lemma_comparison_scale_64(b.coeff as int, (if gap < 0 { -(gap as int) } else { 0 }) as nat);
+        crate::verus_model::lemma_comparison_clamp_64(a, b, gap as int);
+    }
+    (
+        u128::from(a.coeff as u64) * u128::from(pow10_64(gap.max(0) as u32)),
+        u128::from(b.coeff as u64) * u128::from(pow10_64((-gap).max(0) as u32)),
+    )
+}
+
+#[inline]
+#[cfg_attr(verus_keep_ghost, verus_spec(ret =>
+    requires
+        a.coeff < 10000000000000000int, b.coeff < 10000000000000000int,
+        -398 <= a.exp <= 369, -398 <= b.exp <= 369,
+    ensures
+        ret == (crate::verus_model::comparison_value(a, b) == crate::verus_model::comparison_value(b, a)),
+))]
+fn eq_64(a: Unpacked, b: Unpacked) -> bool {
+    if a.exp == b.exp {
+        #[cfg(verus_keep_ghost)]
+        proof! { vstd::arithmetic::power::lemma_pow0(10); }
+        return (a.coeff == b.coeff) & ((a.neg == b.neg) | (a.coeff == 0));
+    }
+    let (ac, bc) = clamped_magnitudes_64(a, b);
+    #[cfg(verus_keep_ghost)]
+    proof! { crate::verus_model::lemma_comparison_signs(a, b, ac as int, bc as int); }
+    (ac == bc) & ((a.neg == b.neg) | (ac == 0))
+}
+
+#[inline]
+#[cfg_attr(verus_keep_ghost, verus_spec(ret =>
+    requires
+        a.coeff < 10000000000000000int, b.coeff < 10000000000000000int,
+        -398 <= a.exp <= 369, -398 <= b.exp <= 369,
+    ensures
+        crate::verus_model::comparison_result(ret, a, b),
+))]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "clamped magnitudes are below 10^32 < 2^107, so i128 conversion and sign application are exact"
+)]
+fn cmp_64(a: Unpacked, b: Unpacked) -> Ordering {
+    if a.exp == b.exp {
+        #[cfg(verus_keep_ghost)]
+        proof! { vstd::arithmetic::power::lemma_pow0(10); }
+        let ac = a.coeff as i128;
+        let bc = b.coeff as i128;
+        let ac = if a.neg { -ac } else { ac };
+        let bc = if b.neg { -bc } else { bc };
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(crate::verus_model::comparison_value(a, b) == ac as int);
+            assert(crate::verus_model::comparison_value(b, a) == bc as int);
+        }
+        return ac.cmp(&bc);
+    }
+    let (ac, bc) = clamped_magnitudes_64(a, b);
+    #[cfg(verus_keep_ghost)]
+    proof! { crate::verus_model::lemma_comparison_signs(a, b, ac as int, bc as int); }
+    let ac = ac as i128;
+    let bc = bc as i128;
+    let ac = if a.neg { -ac } else { ac };
+    let bc = if b.neg { -bc } else { bc };
+    ac.cmp(&bc)
+}
+
+#[inline]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "canonical coefficients < 10^34 fit i128; exponent differences fit i32 and gaps up to four give products < 10^38"
+)]
+#[cfg_attr(verus_keep_ghost, verus_spec(ret =>
+    requires
+        a.coeff < 10000000000000000000000000000000000int,
+        b.coeff < 10000000000000000000000000000000000int,
+        -6176 <= a.exp <= 6111, -6176 <= b.exp <= 6111,
+    ensures crate::verus_model::comparison_result(ret, a, b),
+))]
+fn cmp_128(a: Unpacked, b: Unpacked) -> Ordering {
+    let gap = a.exp - b.exp;
+    if (-4..=4).contains(&gap) {
+        let ac = a.coeff as i128;
+        let bc = b.coeff as i128;
+        let mut ac = if a.neg { -ac } else { ac };
+        let mut bc = if b.neg { -bc } else { bc };
+        if gap > 0 {
+            #[cfg(verus_keep_ghost)]
+            proof! { crate::verus_model::lemma_add_fast_scale(ac as int, gap as nat); }
+            ac *= pow10(gap as u32) as i128;
+        } else if gap < 0 {
+            #[cfg(verus_keep_ghost)]
+            proof! { crate::verus_model::lemma_add_fast_scale(bc as int, (-gap) as nat); }
+            bc *= pow10((-gap) as u32) as i128;
+        }
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            vstd::arithmetic::power::lemma_pow0(10);
+            crate::verus_model::lemma_add_signed_product(a.neg, a.coeff as int, a.exp as int, crate::verus_model::min_exp(a, b), ac as int);
+            crate::verus_model::lemma_add_signed_product(b.neg, b.coeff as int, b.exp as int, crate::verus_model::min_exp(a, b), bc as int);
+        }
+        return ac.cmp(&bc);
+    }
+    cmp_wide_gap_128(a, b)
+}
+
+#[inline]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "W32/W64 multiply only in clamped_magnitudes_32/64; remaining arithmetic has P=34 and coefficients < 10^P, exponent difference in -12287..=12287, powers <= 38-P and scaled coefficients < 10^38 < 2^127"
 )]
 pub(crate) fn eq<W: Width>(a: Unpacked, b: Unpacked) -> bool {
+    if W::LAYOUT.digits == 7 {
+        if a.exp == b.exp {
+            return (a.coeff == b.coeff) & ((a.neg == b.neg) | (a.coeff == 0));
+        }
+        let (ac, bc) = clamped_magnitudes_32(a, b);
+        return (ac == bc) & ((a.neg == b.neg) | (ac == 0));
+    }
+    if W::LAYOUT.digits == 16 {
+        return eq_64(a, b);
+    }
     let gap = a.exp - b.exp;
     let limit = (38 - W::LAYOUT.digits) as i32;
     if (-limit..=limit).contains(&gap) {
@@ -505,26 +658,31 @@ const _: () = assert!(10_u128.pow(38) < (1_u128 << 127));
 #[inline]
 #[expect(
     clippy::arithmetic_side_effects,
-    reason = "P is 7/16/34 and both coefficients < 10^P; exponent difference is in -12287..=12287; guarded scaling uses powers <= 38-P and yields magnitudes < 10^38 < 2^127, so i128 conversion, negation and multiplication are exact"
+    reason = "W32 alignment yields magnitudes < 10^14 < 2^63, so i64 conversion and negation are exact; W64 and W128 delegate to their bounded comparison routines"
 )]
 pub(crate) fn cmp<W: Width>(a: Unpacked, b: Unpacked) -> Ordering {
-    let gap = a.exp - b.exp;
-    let limit = (38 - W::LAYOUT.digits) as i32;
-    if (-limit..=limit).contains(&gap) {
-        let ac = a.coeff as i128;
-        let bc = b.coeff as i128;
-        let mut ac = if a.neg { -ac } else { ac };
-        let mut bc = if b.neg { -bc } else { bc };
-        if gap > 0 {
-            ac *= pow10(gap as u32) as i128;
-        } else if gap < 0 {
-            bc *= pow10((-gap) as u32) as i128;
+    if W::LAYOUT.digits == 7 {
+        if a.exp == b.exp {
+            let ac = a.coeff as i64;
+            let bc = b.coeff as i64;
+            let ac = if a.neg { -ac } else { ac };
+            let bc = if b.neg { -bc } else { bc };
+            return ac.cmp(&bc);
         }
+        let (ac, bc) = clamped_magnitudes_32(a, b);
+        let ac = ac as i64;
+        let bc = bc as i64;
+        let ac = if a.neg { -ac } else { ac };
+        let bc = if b.neg { -bc } else { bc };
         return ac.cmp(&bc);
     }
-    cmp_general(a, b)
+    if W::LAYOUT.digits == 16 {
+        return cmp_64(a, b);
+    }
+    cmp_128(a, b)
 }
 
+#[cfg(kani)]
 #[inline(never)]
 fn cmp_general(a: Unpacked, b: Unpacked) -> Ordering {
     let a_neg = a.neg && a.coeff != 0;
@@ -574,7 +732,7 @@ const _: () = assert!((10_u128.pow(34) - 1) * 10_001 < (1_u128 << 127));
 #[inline]
 #[expect(
     clippy::arithmetic_side_effects,
-    reason = "decoded exponents differ by at most 12287; the guarded gap is <= 4, powers <= 10^4, and signed scaled coefficients and sum have magnitude <= (10^34-1)*10001 < 2^127 (checked at compile time); the checked constructor establishes the result layout bounds"
+    reason = "decoded exponents differ by at most 12287; the gap window bounds the sum by (10^34-1)*10001 < 2^127; otherwise 10*abs(gap)+3*bit_width(high coefficient) <= 378 bounds its scaled magnitude below 2^126 and the other below 10^34 < 2^126; guard arithmetic fits u32 and InRange::checked validates the preferred-exponent result"
 )]
 #[cfg_attr(verus_keep_ghost, verus_spec(ret =>
     requires
@@ -582,84 +740,134 @@ const _: () = assert!((10_u128.pow(34) - 1) * 10_001 < (1_u128 << 127));
         crate::layout::in_range(a, crate::layout::W128::LAYOUT),
         crate::layout::in_range(b, crate::layout::W128::LAYOUT),
     ensures
-        crate::verus_model::rounded(
-            ret,
+        match ret { Some(value) => crate::verus_model::rounded(
+            Ok(value),
             crate::verus_model::sum_sign(a, b, subtract, dir),
             crate::verus_model::abs_int(crate::verus_model::exact_sum(a, b, subtract)),
             crate::verus_model::min_exp(a, b),
             crate::verus_model::min_exp(a, b),
             dir,
-        ),
+        ), None => true },
 ))]
 pub(crate) fn add_sub<W: Width>(
     a: Unpacked,
     b: Unpacked,
     subtract: bool,
     dir: Option<Rounding>,
-) -> Result<InRange<W>, Error> {
+) -> Option<InRange<W>> {
     #[cfg(verus_keep_ghost)]
     proof! {
         crate::verus_model::lemma_add_input::<W>(a, b);
         vstd::arithmetic::power::lemma_pow0(10);
     }
     let gap = a.exp - b.exp;
-    if (-4..=4).contains(&gap) {
-        let b_neg = b.neg ^ subtract;
-        let ac = a.coeff as i128;
-        let bc = b.coeff as i128;
-        let mut ac = if a.neg { -ac } else { ac };
-        let mut bc = if b_neg { -bc } else { bc };
-        #[cfg(verus_keep_ghost)]
-        proof_decl! {
-            let ghost bc0: int = bc as int;
+    if W::LAYOUT.digits < 34 {
+        let distance = if gap >= 0 { gap as u32 } else { (-gap) as u32 };
+        if distance > 4 {
+            return None;
         }
-        if gap > 0 {
+    }
+    let b_neg = b.neg ^ subtract;
+    let ac = a.coeff as i128;
+    let bc = b.coeff as i128;
+    let mut ac = if a.neg { -ac } else { ac };
+    let mut bc = if b_neg { -bc } else { bc };
+    #[cfg(verus_keep_ghost)]
+    proof_decl! {
+        let ghost ac0: int = ac as int;
+        let ghost bc0: int = bc as int;
+    }
+    if gap != 0 {
+        if W::LAYOUT.digits < 34 {
+            let a_shift = gap.max(0) as u32;
+            let b_shift = (-gap).max(0) as u32;
             #[cfg(verus_keep_ghost)]
-            proof! { crate::verus_model::lemma_add_fast_scale(ac as int, gap as nat); }
-            ac *= pow10(gap as u32) as i128;
-        } else if gap < 0 {
-            #[cfg(verus_keep_ghost)]
-            proof! { crate::verus_model::lemma_add_fast_scale(bc as int, (-gap) as nat); }
-            bc *= pow10((-gap) as u32) as i128;
+            proof! {
+                crate::verus_model::lemma_add_fast_scale(ac as int, a_shift as nat);
+                crate::verus_model::lemma_add_fast_scale(bc as int, b_shift as nat);
+            }
+            ac *= pow10_64(a_shift) as i128;
+            bc *= pow10_64(b_shift) as i128;
+        } else {
+            let distance = if gap >= 0 { gap as u32 } else { (-gap) as u32 };
+            if distance > 37 {
+                return None;
+            }
+            let high_coeff = if gap > 0 { a.coeff } else { b.coeff };
+            let bits = high_coeff.bit_width();
+            if 10 * distance + 3 * bits.min(112) > 378 {
+                return None;
+            }
+            if gap > 0 {
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    if gap <= 4 {
+                        crate::verus_model::lemma_add_fast_scale(ac as int, gap as nat);
+                    } else {
+                        crate::verus_model::lemma_add_bit_scale(ac as int, bits as nat, gap as nat);
+                    }
+                }
+                ac *= pow10(distance) as i128;
+            } else if gap < 0 {
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    if -gap <= 4 {
+                        crate::verus_model::lemma_add_fast_scale(bc as int, (-gap) as nat);
+                    } else {
+                        crate::verus_model::lemma_add_bit_scale(bc as int, bits as nat, (-gap) as nat);
+                    }
+                }
+                bc *= pow10(distance) as i128;
+            }
         }
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        use crate::verus_model::*;
+        use vstd::arithmetic::power::*;
+        lemma_pow0(10);
+        if gap <= 0 {
+            assert(ac as int == ac0);
+            assert(pow(10, (a.exp as int - min_exp(a, b)) as nat) == 1);
+            assert(ac0 * pow(10, 0) == ac0) by (nonlinear_arith)
+                requires pow(10, 0) == 1;
+        } else {
+            assert(ac as int == ac0 * pow(10, gap as nat));
+        }
+        if gap >= 0 {
+            assert(bc as int == bc0);
+            assert(pow(10, (b.exp as int - min_exp(a, b)) as nat) == 1);
+            assert(bc0 * pow(10, 0) == bc0) by (nonlinear_arith)
+                requires pow(10, 0) == 1;
+        } else {
+            assert(bc as int == bc0 * pow(10, (-gap) as nat));
+        }
+        lemma_add_signed_product(a.neg, a.coeff as int, a.exp as int, min_exp(a, b), ac as int);
+        lemma_add_signed_product(b_neg, b.coeff as int, b.exp as int, min_exp(a, b), bc as int);
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! { crate::verus_model::lemma_add_sum_bound(ac as int, bc as int); }
+    let sum = ac + bc;
+    let negative_zero = zero_sign(a.neg, b_neg, dir);
+    if let Some(value) = InRange::checked(
+        sum < 0 || (sum == 0 && negative_zero),
+        sum.unsigned_abs(),
+        i128::from(a.exp.min(b.exp)),
+    ) {
         #[cfg(verus_keep_ghost)]
         proof! {
             use crate::verus_model::*;
-            use vstd::arithmetic::power::*;
-            lemma_pow0(10);
-            if gap >= 0 {
-                assert(bc as int == bc0);
-                assert(pow(10, (b.exp as int - min_exp(a, b)) as nat) == 1);
-                assert(bc0 * pow(10, 0) == bc0) by (nonlinear_arith)
-                    requires pow(10, 0) == 1;
-            } else {
-                assert(bc as int == bc0 * pow(10, (-gap) as nat));
-            }
-            lemma_add_signed_product(a.neg, a.coeff as int, a.exp as int, min_exp(a, b), ac as int);
-            lemma_add_signed_product(b_neg, b.coeff as int, b.exp as int, min_exp(a, b), bc as int);
+            let f = min_exp(a, b);
+            let m = abs_int(exact_sum(a, b, subtract));
+            assert(sum as int == exact_sum(a, b, subtract));
+            lemma_scaled_same(m, m, f);
+            lemma_exact_bounds(m, f, m, f, W::LAYOUT);
+            assert(clamp_exp(f, W::LAYOUT) == f);
+            assert(rounded(Ok(value), sum_sign(a, b, subtract, dir), m, f, f, dir));
         }
-        let sum = ac + bc;
-        let negative_zero = zero_sign(a.neg, b_neg, dir);
-        if let Some(value) = InRange::checked(
-            sum < 0 || (sum == 0 && negative_zero),
-            sum.unsigned_abs(),
-            i128::from(a.exp.min(b.exp)),
-        ) {
-            #[cfg(verus_keep_ghost)]
-            proof! {
-                use crate::verus_model::*;
-                let f = min_exp(a, b);
-                let m = abs_int(exact_sum(a, b, subtract));
-                assert(sum as int == exact_sum(a, b, subtract));
-                lemma_scaled_same(m, m, f);
-                lemma_exact_bounds(m, f, m, f, W::LAYOUT);
-                assert(clamp_exp(f, W::LAYOUT) == f);
-                assert(rounded(Ok(value), sum_sign(a, b, subtract, dir), m, f, f, dir));
-            }
-            return Ok(value);
-        }
+        return Some(value);
     }
-    add_sub_general(a, b, subtract, dir)
+    None
 }
 
 #[inline]
@@ -696,7 +904,7 @@ fn zero_sign(a_neg: bool, b_neg: bool, dir: Option<Rounding>) -> bool {
         ),
 ))]
 #[cfg_attr(verus_keep_ghost, verifier::rlimit(60))]
-fn add_sub_general<W: Width>(
+pub(crate) fn add_sub_general<W: Width>(
     mut a: Unpacked,
     mut b: Unpacked,
     subtract: bool,
@@ -1358,6 +1566,133 @@ fn exceeds_max<W: Width>(cx: u128, x_exp: i32, d: u32, t: u128) -> bool {
                 Some(limit) => t > limit,
                 None => false,
             })
+}
+
+#[inline(never)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "canonical coefficients < 10^34; nonzero adjusted exponents fit i32 and their equality bounds alignment gaps by 33 and products below 10^34"
+)]
+#[cfg_attr(verus_keep_ghost, verus_spec(ret =>
+    requires
+        a.coeff < 10000000000000000000000000000000000int,
+        b.coeff < 10000000000000000000000000000000000int,
+        -6176 <= a.exp <= 6111, -6176 <= b.exp <= 6111,
+    ensures crate::verus_model::comparison_result(ret, a, b),
+))]
+fn cmp_wide_gap_128(a: Unpacked, b: Unpacked) -> Ordering {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        use vstd::arithmetic::{power::*, mul::*};
+        let ka = (a.exp - crate::verus_model::min_exp(a, b)) as nat;
+        let kb = (b.exp - crate::verus_model::min_exp(a, b)) as nat;
+        lemma_pow_positive(10, ka);
+        lemma_pow_positive(10, kb);
+        lemma_mul_nonnegative(a.coeff as int, pow(10, ka));
+        lemma_mul_nonnegative(b.coeff as int, pow(10, kb));
+        if a.coeff > 0 { lemma_mul_strictly_positive(a.coeff as int, pow(10, ka)); }
+        if b.coeff > 0 { lemma_mul_strictly_positive(b.coeff as int, pow(10, kb)); }
+        assert(a.coeff * pow(10, ka) == 0 <==> a.coeff == 0) by (nonlinear_arith)
+            requires pow(10, ka) > 0, a.coeff >= 0;
+        assert(b.coeff * pow(10, kb) == 0 <==> b.coeff == 0) by (nonlinear_arith)
+            requires pow(10, kb) > 0, b.coeff >= 0;
+        crate::verus_model::lemma_comparison_signs(a, b, a.coeff * pow(10, ka), b.coeff * pow(10, kb));
+    }
+    let a_neg = a.neg && a.coeff != 0;
+    let b_neg = b.neg && b.coeff != 0;
+    match (a_neg as u8).cmp(&(b_neg as u8)) {
+        Ordering::Equal => {
+            #[cfg(verus_keep_ghost)]
+            proof! { assert(a_neg == b_neg); }
+            let order = if a.coeff == 0 || b.coeff == 0 {
+                a.coeff.cmp(&b.coeff)
+            } else {
+                let da = digits(a.coeff);
+                let db = digits(b.coeff);
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    reveal(vstd::arithmetic::power::pow);
+                    assert(vstd::arithmetic::power::pow(10, 34) == 10000000000000000000000000000000000int) by (compute_only);
+                    crate::verus_model::lemma_decimal_digits_le(a.coeff as nat, 34);
+                    crate::verus_model::lemma_decimal_digits_le(b.coeff as nat, 34);
+                    crate::verus_model::lemma_comparison_adjusted(a, b, da as nat, db as nat);
+                }
+                let ae = a.exp + da as i32;
+                let be = b.exp + db as i32;
+                let order = match ae.cmp(&be) {
+                    Ordering::Equal => {
+                        #[cfg(verus_keep_ghost)]
+                        proof! {
+                            vstd::arithmetic::power::lemma_pow0(10);
+                            crate::verus_model::lemma_comparison_align_128(a, b, da as nat, db as nat);
+                        }
+                        let gap = a.exp - b.exp;
+                        if gap > 0 {
+                            (a.coeff * pow10(gap as u32)).cmp(&b.coeff)
+                        } else {
+                            a.coeff.cmp(&(b.coeff * pow10((-gap) as u32)))
+                        }
+                    }
+                    order => order,
+                };
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    vstd::arithmetic::power::lemma_pow0(10);
+                    let x = a.coeff * vstd::arithmetic::power::pow(10, (a.exp - crate::verus_model::min_exp(a, b)) as nat);
+                    let y = b.coeff * vstd::arithmetic::power::pow(10, (b.exp - crate::verus_model::min_exp(a, b)) as nat);
+                    assert(match order {
+                        Ordering::Less => x < y,
+                        Ordering::Equal => x == y,
+                        Ordering::Greater => x > y,
+                    });
+                }
+                order
+            };
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                let x = a.coeff * vstd::arithmetic::power::pow(10, (a.exp - crate::verus_model::min_exp(a, b)) as nat);
+                let y = b.coeff * vstd::arithmetic::power::pow(10, (b.exp - crate::verus_model::min_exp(a, b)) as nat);
+                assert(match order {
+                    Ordering::Less => x < y,
+                    Ordering::Equal => x == y,
+                    Ordering::Greater => x > y,
+                });
+            }
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                let x = a.coeff * vstd::arithmetic::power::pow(10, (a.exp - crate::verus_model::min_exp(a, b)) as nat);
+                let y = b.coeff * vstd::arithmetic::power::pow(10, (b.exp - crate::verus_model::min_exp(a, b)) as nat);
+                assert(crate::verus_model::same_order(
+                    if a_neg { -x } else { x }, if b_neg { -y } else { y },
+                    crate::verus_model::comparison_value(a, b), crate::verus_model::comparison_value(b, a)));
+            }
+            if a_neg {
+                match order {
+                    Ordering::Less => Ordering::Greater,
+                    Ordering::Equal => Ordering::Equal,
+                    Ordering::Greater => Ordering::Less,
+                }
+            } else {
+                order
+            }
+        }
+        Ordering::Less => {
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert(!a_neg && b_neg);
+                assert(crate::verus_model::comparison_result(Ordering::Greater, a, b));
+            }
+            Ordering::Greater
+        }
+        Ordering::Greater => {
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert(a_neg && !b_neg);
+                assert(crate::verus_model::comparison_result(Ordering::Less, a, b));
+            }
+            Ordering::Less
+        }
+    }
 }
 
 #[cfg(kani)]

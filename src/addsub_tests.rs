@@ -515,3 +515,83 @@ fn addsub_near_exponent_exact_path_boundaries() {
         }
     }
 }
+
+#[test]
+fn addsub_decimal128_bit_width_alignment_boundaries() {
+    let powers = Powers::new(12400);
+    let (_, lo, hi) = bounds(Format::D128);
+    let max = 10_u128.pow(34) - 1;
+    for gap in 0..=38 {
+        let bit_boundary = (126 - (10 * gap + 2) / 3).clamp(0, 113);
+        let mut high_coeffs = std::vec![0, 1, max];
+        for bits in (bit_boundary - 1).max(0)..=bit_boundary + 1 {
+            let power = 1_u128 << bits;
+            high_coeffs.extend([power - 1, power, power + 1]);
+        }
+        high_coeffs.retain(|&coeff| coeff <= max);
+        high_coeffs.sort_unstable();
+        high_coeffs.dedup();
+        let scale = 10_u128.pow(gap as u32);
+        for high_coeff in high_coeffs {
+            let mut low_coeffs = std::vec![0, 1, max];
+            if let Some(aligned) = high_coeff.checked_mul(scale).filter(|&c| c <= max) {
+                low_coeffs.push(aligned);
+            }
+            low_coeffs.sort_unstable();
+            low_coeffs.dedup();
+            for low_coeff in low_coeffs {
+                for low_exp in [lo, 0, hi - gap] {
+                    let high = value(high_coeff, low_exp + gap);
+                    let low = value(low_coeff, low_exp);
+                    signed_pairs(high, Format::D128, low, Format::D128, Format::D128, &powers);
+                    signed_pairs(low, Format::D128, high, Format::D128, Format::D128, &powers);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn addsub_decimal128_precision_and_exponent_boundaries() {
+    let powers = Powers::new(12400);
+    let (_, lo, hi) = bounds(Format::D128);
+    let limit = 10_u128.pow(34);
+    let max = limit - 1;
+    for gap in 0..=38 {
+        let scale = 10_u128.pow(gap as u32);
+        for total in [max, limit, limit + 1] {
+            let high_coeff = max.min(total / scale);
+            let low_coeff = total - high_coeff * scale;
+            if low_coeff > max {
+                continue;
+            }
+            for low_exp in [lo, 0, hi - gap] {
+                let high = value(high_coeff, low_exp + gap);
+                let low = value(low_coeff, low_exp);
+                signed_pairs(high, Format::D128, low, Format::D128, Format::D128, &powers);
+                signed_pairs(low, Format::D128, high, Format::D128, Format::D128, &powers);
+            }
+        }
+    }
+    for high_coeff in [0, 1, max] {
+        for low_coeff in [0, 1, max] {
+            let high = value(high_coeff, hi);
+            let low = value(low_coeff, lo);
+            signed_pairs(high, Format::D128, low, Format::D128, Format::D128, &powers);
+            signed_pairs(low, Format::D128, high, Format::D128, Format::D128, &powers);
+        }
+    }
+}
+
+#[test]
+fn addsub_decimal128_exact_sum_after_large_gap_cohort_reduction() {
+    let powers = Powers::new(12400);
+    let a = value(1, 0);
+    let b = value(100_000, -38);
+    signed_pairs(a, Format::D128, b, Format::D128, Format::D128, &powers);
+    signed_pairs(b, Format::D128, a, Format::D128, Format::D128, &powers);
+    assert_eq!(
+        actual(d128(a), d128(b), Format::D128, false, None),
+        Ok(Value::Finite(value(10_u128.pow(33) + 1, -33)))
+    );
+}

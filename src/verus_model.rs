@@ -146,6 +146,161 @@ pub(crate) open spec fn rounded<W: crate::layout::Width>(
     }
 }
 
+pub(crate) open spec fn same_result<W: crate::layout::Width>(a: Result<crate::layout::InRange<W>, crate::Error>, b: Result<crate::layout::InRange<W>, crate::Error>) -> bool {
+    match (a, b) {
+        (Ok(x), Ok(y)) => x.view() == y.view(),
+        (Err(x), Err(y)) => x == y,
+        _ => false,
+    }
+}
+
+pub(crate) proof fn lemma_narrow_cohort_order(c1: int, e1: int, c2: int, e2: int, pref: int, exact: bool, lay: crate::layout::Layout)
+    requires
+        fit_layout(lay),
+        fits(c1, e1, lay), fits(c2, e2, lay),
+        lay.qmin <= pref <= lay.qmax,
+        scaled_eq(c1, e1, c2, e2),
+        if exact { closest_exp(c1, e1, pref, lay) && closest_exp(c2, e2, pref, lay) }
+        else { least_exp(c1, e1, lay) && least_exp(c2, e2, lay) },
+        e1 < e2,
+    ensures false,
+{
+    let g = (e2 - e1) as nat;
+    let t = pow(10, g);
+    lemma_pow0(10);
+    lemma_pow1(10);
+    lemma_pow_increases(10, 1, g);
+    lemma_scaled_base(c1, e1, c2, e2, e1);
+    lemma_scaled_base(c2, e2, c1, e1, e1);
+    assert(c1 == c2 * t);
+    if !exact || e2 > pref {
+        assert(10 * c2 >= pow(10, lay.digits as nat));
+        assert(c1 >= 10 * c2) by (nonlinear_arith)
+            requires c1 == c2 * t, t >= 10, c2 >= 0;
+    } else {
+        assert(c1 % 10 != 0);
+        lemma_pow10_step((g - 1) as nat);
+        assert(c1 == (c2 * pow(10, (g - 1) as nat)) * 10) by (nonlinear_arith)
+            requires c1 == c2 * pow(10, g), pow(10, g) == 10 * pow(10, (g - 1) as nat);
+        lemma_mod_multiples_basic(c2 * pow(10, (g - 1) as nat), 10);
+    }
+}
+
+pub(crate) proof fn lemma_narrow_finite_bound(c: int, e: int, lay: crate::layout::Layout)
+    requires fit_layout(lay), fits(c, e, lay),
+    ensures
+        scaled_le(c, e, pow(10, lay.digits as nat) - 1, lay.qmax as int),
+        !scaled_le(pow(10, lay.digits as nat), lay.qmax as int, c, e),
+{
+    let p10 = pow(10, lay.digits as nat);
+    let g = (lay.qmax - e) as nat;
+    lemma_pow0(10);
+    lemma_scaled_base(c, e, p10 - 1, lay.qmax as int, e);
+    lemma_scaled_base(p10, lay.qmax as int, c, e, e);
+    assert(c * pow(10, 0) == c) by (nonlinear_arith)
+        requires pow(10, 0) == 1;
+    lemma_pow_positive(10, g);
+    lemma_pow_positive(10, lay.digits as nat);
+    assert(c <= (p10 - 1) * pow(10, g)) by (nonlinear_arith)
+        requires 0 <= c < p10, pow(10, g) >= 1;
+    assert(p10 * pow(10, g) > c) by (nonlinear_arith)
+        requires 0 <= c < p10, pow(10, g) >= 1;
+}
+
+pub(crate) proof fn lemma_narrow_ok_excludes_error<W: crate::layout::Width>(r: crate::layout::InRange<W>, err: crate::Error, neg: bool, m: int, f: int, pref: int, dir: Option<crate::Rounding>)
+    requires
+        crate::layout::bid_width(W::LAYOUT),
+        rounded(Ok(r), neg, m, f, pref, dir),
+        rounded::<W>(Err(err), neg, m, f, pref, dir),
+    ensures false,
+{
+    crate::layout::lemma_layout_values();
+    let lay = W::LAYOUT;
+    let c = r.view().coeff as int;
+    let e = r.view().exp as int;
+    let p10 = pow(10, lay.digits as nat);
+    let qmax = lay.qmax as int;
+    lemma_narrow_finite_bound(c, e, lay);
+    match err {
+        crate::Error::Inexact => { assert(fits(c, e, lay)); },
+        crate::Error::Overflow => {
+            if dir is None || rounded_up(neg, dir) {
+                lemma_scaled_trans(m, f, c, e, p10 - 1, qmax);
+            } else {
+                let low = pow(10, (lay.digits - 1) as nat);
+                lemma_pow10_step((lay.digits - 1) as nat);
+                lemma_pow0(10);
+                lemma_pow1(10);
+                lemma_scaled_base(p10, qmax, low, qmax + 1, qmax);
+                lemma_scaled_base(low, qmax + 1, p10, qmax, qmax);
+                assert(scaled_eq(p10, qmax, low, qmax + 1));
+                lemma_scaled_trans(low, qmax + 1, p10, qmax, m, f);
+                assert(fits_above(low, qmax + 1, lay));
+                assert(scaled_le(low, qmax + 1, c, e));
+                lemma_scaled_trans(p10, qmax, low, qmax + 1, c, e);
+            }
+        },
+        _ => {},
+    }
+}
+
+pub(crate) proof fn lemma_narrow_rounded_unique<W: crate::layout::Width>(r1: Result<crate::layout::InRange<W>, crate::Error>, r2: Result<crate::layout::InRange<W>, crate::Error>, neg: bool, m: int, f: int, pref: int, dir: Option<crate::Rounding>)
+    requires
+        crate::layout::bid_width(W::LAYOUT),
+        rounded(r1, neg, m, f, pref, dir),
+        rounded(r2, neg, m, f, pref, dir),
+    ensures same_result(r1, r2),
+{
+    crate::layout::lemma_layout_values();
+    let lay = W::LAYOUT;
+    match (r1, r2) {
+        (Ok(a), Ok(b)) => {
+            let c1 = a.view().coeff as int;
+            let e1 = a.view().exp as int;
+            let c2 = b.view().coeff as int;
+            let e2 = b.view().exp as int;
+            assert(fits_above(c1, e1, lay));
+            assert(fits_above(c2, e2, lay));
+            if dir is None {
+                lemma_scaled_trans(c1, e1, m, f, c2, e2);
+                lemma_scaled_trans(c2, e2, m, f, c1, e1);
+            }
+            assert(scaled_eq(c1, e1, c2, e2));
+            if scaled_eq(c1, e1, m, f) {
+                lemma_scaled_trans(c2, e2, c1, e1, m, f);
+                lemma_scaled_trans(m, f, c1, e1, c2, e2);
+            }
+            if scaled_eq(c2, e2, m, f) {
+                lemma_scaled_trans(c1, e1, c2, e2, m, f);
+                lemma_scaled_trans(m, f, c2, e2, c1, e1);
+            }
+            let exact = scaled_eq(c1, e1, m, f);
+            let preference = clamp_exp(pref, lay);
+            if e1 < e2 { lemma_narrow_cohort_order(c1, e1, c2, e2, preference, exact, lay); }
+            if e2 < e1 { lemma_narrow_cohort_order(c2, e2, c1, e1, preference, exact, lay); }
+            lemma_scaled_same(c1, c2, e1);
+            lemma_scaled_same(c2, c1, e1);
+        },
+        (Ok(a), Err(err)) => { lemma_narrow_ok_excludes_error(a, err, neg, m, f, pref, dir); },
+        (Err(err), Ok(b)) => { lemma_narrow_ok_excludes_error(b, err, neg, m, f, pref, dir); },
+        (Err(_), Err(_)) => {},
+    }
+}
+
+pub(crate) proof fn lemma_narrow_rounded_deterministic<W: crate::layout::Width>()
+    requires crate::layout::bid_width(W::LAYOUT),
+    ensures
+        forall|r1: Result<crate::layout::InRange<W>, crate::Error>, r2: Result<crate::layout::InRange<W>, crate::Error>, neg: bool, m: int, f: int, pref: int, dir: Option<crate::Rounding>|
+            #![trigger rounded(r1, neg, m, f, pref, dir), rounded(r2, neg, m, f, pref, dir)]
+            rounded(r1, neg, m, f, pref, dir) && rounded(r2, neg, m, f, pref, dir) ==> same_result(r1, r2),
+{
+    assert forall|r1: Result<crate::layout::InRange<W>, crate::Error>, r2: Result<crate::layout::InRange<W>, crate::Error>, neg: bool, m: int, f: int, pref: int, dir: Option<crate::Rounding>|
+        #![trigger rounded(r1, neg, m, f, pref, dir), rounded(r2, neg, m, f, pref, dir)]
+        rounded(r1, neg, m, f, pref, dir) && rounded(r2, neg, m, f, pref, dir) implies same_result(r1, r2) by {
+        lemma_narrow_rounded_unique(r1, r2, neg, m, f, pref, dir);
+    }
+}
+
 pub(crate) open spec fn signed_at(neg: bool, c: int, e: int, f: int) -> int {
     if neg {
         -(c * pow(10, (e - f) as nat))
@@ -238,6 +393,90 @@ pub(crate) proof fn lemma_add_fast_scale(c: int, k: nat)
     assert(pow(10, 4) == 10000) by (compute_only);
     assert(-99999999999999999999999999999999990000int <= c * pow(10, k) <= 99999999999999999999999999999999990000int) by (nonlinear_arith)
         requires -9999999999999999999999999999999999int <= c <= 9999999999999999999999999999999999int, 1 <= pow(10, k) <= 10000;
+}
+
+pub(crate) proof fn lemma_add_pow10_bit_bound(k: nat)
+    requires k <= 37,
+    ensures pow(10, k) <= pow2(((10 * k + 2) / 3) as nat),
+    decreases k,
+{
+    if k < 3 {
+        reveal(pow);
+        reveal(pow2);
+        if k == 0 { assert(pow(10, 0) <= pow2(0)) by (compute_only); }
+        else if k == 1 { assert(pow(10, 1) <= pow2(4)) by (compute_only); }
+        else { assert(pow(10, 2) <= pow2(7)) by (compute_only); }
+    } else {
+        let previous = (k - 3) as nat;
+        let width = ((10 * previous + 2) / 3) as nat;
+        lemma_add_pow10_bit_bound(previous);
+        lemma_pow_adds(10, previous, 3);
+        lemma_pow2_adds(width, 10);
+        assert((10 * k + 2) / 3 == width + 10) by (nonlinear_arith)
+            requires k >= 3, previous == k - 3, width == (10 * previous + 2) / 3;
+        assert(pow(10, 3) == 1000) by (compute_only);
+        assert(pow2(10) == 1024) by (compute_only);
+        lemma_pow2_pos(width);
+        assert(pow(10, previous) * 1000 <= pow2(width) * 1024) by (nonlinear_arith)
+            requires pow(10, previous) <= pow2(width), pow2(width) > 0;
+    }
+}
+
+pub(crate) proof fn lemma_add_bit_scale(c: int, bits: nat, k: nat)
+    requires
+        c == 0 ==> bits == 0,
+        c != 0 ==> abs_int(c) < pow2(bits),
+        10 * k + 3 * bits <= 378,
+    ensures
+        k <= 37,
+        1 <= pow(10, k) < 85070591730234615865843651857942052864int,
+        -85070591730234615865843651857942052864int < c * pow(10, k) < 85070591730234615865843651857942052864int,
+{
+    let width = ((10 * k + 2) / 3) as nat;
+    lemma_add_pow10_bit_bound(k);
+    lemma_pow_positive(10, k);
+    assert(width + bits <= 126) by (nonlinear_arith)
+        requires 10 * k + 3 * bits <= 378, width == (10 * k + 2) / 3;
+    lemma_pow2_adds(bits, width);
+    if bits + width < 126 { lemma_pow2_strictly_increases(bits + width, 126); }
+    assert(pow2(126) == 85070591730234615865843651857942052864int) by (compute_only);
+    if c != 0 {
+        lemma_mul_strict_inequality(abs_int(c), pow2(bits) as int, pow(10, k));
+        lemma_mul_inequality(pow(10, k), pow2(width) as int, pow2(bits) as int);
+    }
+    assert(-85070591730234615865843651857942052864int < c * pow(10, k) < 85070591730234615865843651857942052864int) by (nonlinear_arith)
+        requires 0 <= abs_int(c) * pow(10, k) < 85070591730234615865843651857942052864int,
+            abs_int(c) == if c < 0 { -c } else { c };
+    lemma_pow10_bounds(k);
+    lemma_pow_increases(10, k, 37);
+    assert(pow(10, 37) < 85070591730234615865843651857942052864int) by (compute_only);
+}
+
+pub(crate) proof fn lemma_add_sum_bound(a: int, b: int)
+    requires
+        -99999999999999999999999999999999990000int <= a <= 99999999999999999999999999999999990000int,
+        -99999999999999999999999999999999990000int <= b <= 99999999999999999999999999999999990000int,
+        abs_int(a) <= 9999999999999999999999999999999999int
+            || abs_int(b) <= 9999999999999999999999999999999999int,
+    ensures
+        -170141183460469231731687303715884105728int < a + b < 170141183460469231731687303715884105728int,
+{
+}
+
+pub(crate) proof fn lemma_narrow_align_scale(c: int, k: nat)
+    requires
+        0 <= c < pow(10, (18 - k) as nat),
+        k <= 18,
+    ensures
+        pow(10, k) <= 1_000_000_000_000_000_000int,
+        0 <= c * pow(10, k) < 1_000_000_000_000_000_000int,
+{
+    lemma_pow10_bounds(k);
+    lemma_pow_positive(10, k);
+    lemma_pow_adds(10, (18 - k) as nat, k);
+    assert(pow(10, 18) == 1_000_000_000_000_000_000int) by (compute_only);
+    lemma_mul_nonnegative(c, pow(10, k));
+    lemma_mul_strict_inequality(c, pow(10, (18 - k) as nat), pow(10, k));
 }
 
 pub(crate) proof fn lemma_add_signed_product(neg: bool, c: int, e: int, f: int, v: int)
@@ -437,6 +676,119 @@ pub(crate) proof fn lemma_add_compress_model(an: bool, bn: bool, a: int, b: int,
     lemma_pow_increases(10, (lay.digits - 1) as nat, 33);
     reveal(pow);
     assert(pow(10, 33) == 1000000000000000000000000000000000int) by (compute_only);
+    assert(y > 0) by (nonlinear_arith) requires y == c * t + r, c > 0, t > 0, r > 0;
+    assert(s == if an { -(y * p) } else { y * p }) by (nonlinear_arith)
+        requires
+            s == signed_at(an, a, e + g, f) + signed_at(bn, b, e, f),
+            pow(10, (e + g - f) as nat) == t * p,
+            p == pow(10, (e - f) as nat),
+            b == hi * t + lo,
+            c == if an == bn { a + hi } else { a - hi - 1 },
+            r == if an == bn { lo } else { t - lo }, y == c * t + r;
+    lemma_mul_strictly_positive(y, p);
+    assert(abs_int(s) == y * p);
+    lemma_pow0(10);
+    lemma_scaled_base(abs_int(s), f, c, e + g, f);
+    lemma_scaled_base(c + 1, e + g, abs_int(s), f, f);
+    assert(abs_int(s) * pow(10, 0) == abs_int(s));
+    assert(!scaled_le(abs_int(s), f, c, e + g)) by (nonlinear_arith)
+        requires
+            scaled_le(abs_int(s), f, c, e + g) == (abs_int(s) <= c * pow(10, (e + g - f) as nat)),
+            abs_int(s) == (c * t + r) * p, pow(10, (e + g - f) as nat) == t * p, 0 < r, p > 0;
+    assert(!scaled_le(c + 1, e + g, abs_int(s), f)) by (nonlinear_arith)
+        requires
+            scaled_le(c + 1, e + g, abs_int(s), f) == ((c + 1) * pow(10, (e + g - f) as nat) <= abs_int(s)),
+            abs_int(s) == (c * t + r) * p, pow(10, (e + g - f) as nat) == t * p, r < t, p > 0;
+    lemma_fit_between(c, true, e + g, 0, c, 0);
+    lemma_same_side_gap(c, e + g, 10 * c + 5, e + g - 1, abs_int(s), f, lay);
+}
+
+pub(crate) proof fn lemma_narrow_compress_scale(a: int, n: nat, d: nat, p: nat)
+    requires
+        p == 7 || p == 16,
+        1 <= n <= p,
+        pow(10, (n - 1) as nat) <= a < pow(10, n),
+        d > 18 || a >= pow(10, (18 - d) as nat),
+    ensures
+        d >= p + 3 - n,
+        2 <= d - (p + 1 - n),
+        1 <= p + 1 - n <= 16,
+        pow(10, p) <= a * pow(10, (p + 1 - n) as nat) < pow(10, p + 1),
+        a * pow(10, (p + 1 - n) as nat) < 100000000000000000int,
+{
+    if n + d <= 18 {
+        lemma_pow_increases(10, n, (18 - d) as nat);
+    }
+    lemma_add_digit_scale(a, n, (p + 1 - n) as nat);
+    lemma_pow_increases(10, p + 1, 17);
+    assert(pow(10, 17) == 100000000000000000int) by (compute_only);
+}
+
+pub(crate) proof fn lemma_narrow_compress_bounds(b: int, g: nat, p: nat, hi: int, rem: int)
+    requires
+        p == 7 || p == 16,
+        0 < b < pow(10, p),
+        b % 10 != 0,
+        2 <= g,
+        0 <= hi,
+        b == hi * pow(10, g) + rem,
+        0 <= rem < pow(10, g),
+    ensures
+        hi < pow(10, (p - 2) as nat),
+        0 < rem,
+{
+    lemma_pow_positive(10, g);
+    lemma_pow_adds(10, (p - 2) as nat, g);
+    lemma_pow_increases(10, p, (p - 2) as nat + g);
+    if hi >= pow(10, (p - 2) as nat) {
+        lemma_mul_inequality(pow(10, (p - 2) as nat), hi, pow(10, g));
+    }
+    if rem == 0 {
+        lemma_pow10_step((g - 1) as nat);
+        assert(b == (hi * pow(10, (g - 1) as nat)) * 10) by (nonlinear_arith)
+            requires b == hi * pow(10, g), pow(10, g) == 10 * pow(10, (g - 1) as nat);
+        lemma_mod_multiples_basic(hi * pow(10, (g - 1) as nat), 10);
+    }
+}
+
+pub(crate) proof fn lemma_narrow_compress_model(an: bool, bn: bool, a: int, b: int, e: int, f: int, g: nat, hi: int, lo: int, c: int, s: int, lay: crate::layout::Layout)
+    requires
+        fit_layout(lay),
+        pow(10, lay.digits as nat) <= a < pow(10, lay.digits as nat + 1),
+        lay.digits == 7 || lay.digits == 16,
+        0 <= hi < pow(10, (lay.digits - 2) as nat),
+        b == hi * pow(10, g) + lo,
+        0 < lo < pow(10, g),
+        f <= e,
+        c == if an == bn { a + hi } else { a - hi - 1 },
+        s == signed_at(an, a, e + g, f) + signed_at(bn, b, e, f),
+    ensures
+        s != 0,
+        an == (s < 0),
+        pow(10, (lay.digits - 1) as nat) <= c < 0x8000_0000_0000_0000int,
+        same_side(10 * c + 5, e + g - 1, abs_int(s), f, lay),
+{
+    let t = pow(10, g);
+    let p = pow(10, (e - f) as nat);
+    let r = if an == bn { lo } else { t - lo };
+    let y = c * t + r;
+    lemma_pow_positive(10, g);
+    lemma_pow_positive(10, (e - f) as nat);
+    lemma_pow_adds(10, g, (e - f) as nat);
+    assert((e + g - f) as nat == g + (e - f) as nat);
+    assert(0 < r < t);
+    if lay.digits == 7 {
+        assert(pow(10, 5) == 100000int) by (compute_only);
+        assert(pow(10, 6) == 1000000int) by (compute_only);
+        assert(pow(10, 7) == 10000000int) by (compute_only);
+        assert(pow(10, 8) == 100000000int) by (compute_only);
+    } else {
+        assert(pow(10, 14) == 100000000000000int) by (compute_only);
+        assert(pow(10, 15) == 1000000000000000int) by (compute_only);
+        assert(pow(10, 16) == 10000000000000000int) by (compute_only);
+        assert(pow(10, 17) == 100000000000000000int) by (compute_only);
+    }
+    assert(pow(10, (lay.digits - 1) as nat) <= c < 0x8000_0000_0000_0000int);
     assert(y > 0) by (nonlinear_arith) requires y == c * t + r, c > 0, t > 0, r > 0;
     assert(s == if an { -(y * p) } else { y * p }) by (nonlinear_arith)
         requires
@@ -873,6 +1225,35 @@ pub(crate) proof fn lemma_fit_split(c: int, s: bool, e: int, lay: crate::layout:
             assert(q * pow(10, 0) == q);
         }
     }
+}
+
+pub(crate) proof fn lemma_narrow_fit_split(c: int, s: bool, e: int, lay: crate::layout::Layout, d: int, k: int, q: int, rem: int)
+    requires
+        fit_layout(lay),
+        0 <= c < 0x8000_0000_0000_0000int,
+        s ==> pow(10, (lay.digits - 1) as nat) <= c,
+        0 <= d,
+        c < pow(10, d as nat),
+        d > 0 ==> pow(10, (d - 1) as nat) <= c,
+        k >= (if d > lay.digits { d - lay.digits } else { 0 }),
+        k >= lay.qmin - e,
+        k == (if d > lay.digits { d - lay.digits } else { 0 }) || k == lay.qmin - e,
+        c == q * pow(10, k as nat) + rem,
+        0 <= q,
+        0 <= rem < pow(10, k as nat),
+    ensures
+        fit_split(c, s, e, lay, k, q, rem),
+{
+    if k > 39 {
+        lemma_pow10_38();
+        lemma_pow10_step(38);
+        lemma_pow_increases(10, 39, k as nat);
+        assert(q == 0) by (nonlinear_arith)
+            requires c == q * pow(10, k as nat) + rem, q >= 0, rem >= 0,
+                c < 0x8000_0000_0000_0000int,
+                pow(10, k as nat) >= pow(10, 39), pow(10, 39) > 0x8000_0000_0000_0000int;
+    }
+    lemma_fit_split(c, s, e, lay, d, k, if k < 39 { k } else { 39 }, q, rem);
 }
 
 pub(crate) proof fn lemma_fit_between(c: int, s: bool, e: int, k: int, q: int, rem: int)
@@ -2480,6 +2861,137 @@ pub proof fn lemma_scaled_is_multiple_bounds(cs: int, a: nat, f: nat, o: int)
         requires cs == pow2(a) * pow(5, f) * o, pow2(f) <= pow(5, f), 0 < pow2(f), 0 < o, 0 < pow2(a);
     lemma_pow2_above_coefficients(a);
     lemma_pow2_above_coefficients(f);
+}
+
+pub(crate) open spec fn same_order(x: int, y: int, exact_x: int, exact_y: int) -> bool {
+    (x < y <==> exact_x < exact_y) && (x == y <==> exact_x == exact_y)
+}
+
+pub(crate) open spec fn comparison_value(a: crate::layout::Unpacked, b: crate::layout::Unpacked) -> int {
+    signed_at(a.neg, a.coeff as int, a.exp as int, min_exp(a, b))
+}
+
+pub(crate) open spec fn comparison_result(r: core::cmp::Ordering, a: crate::layout::Unpacked, b: crate::layout::Unpacked) -> bool {
+    let x = comparison_value(a, b);
+    let y = comparison_value(b, a);
+    match r {
+        core::cmp::Ordering::Less => x < y,
+        core::cmp::Ordering::Equal => x == y,
+        core::cmp::Ordering::Greater => x > y,
+    }
+}
+
+pub(crate) proof fn lemma_comparison_scale_64(c: int, k: nat)
+    requires 0 <= c < 10000000000000000int, k <= 16,
+    ensures
+        1 <= pow(10, k) <= 10000000000000000int,
+        0 <= c * pow(10, k) < 100000000000000000000000000000000int,
+        c * pow(10, k) == 0 <==> c == 0,
+{
+    lemma_pow_positive(10, k);
+    lemma_pow_increases(10, k, 16);
+    assert(c * pow(10, k) == 0 <==> c == 0) by (nonlinear_arith)
+        requires 0 <= c, pow(10, k) > 0;
+    assert(pow(10, 16) == 10000000000000000int) by (compute_only);
+    assert(0 <= c * pow(10, k) < 100000000000000000000000000000000int) by (nonlinear_arith)
+        requires 0 <= c < 10000000000000000int, 1 <= pow(10, k) <= 10000000000000000int;
+}
+
+pub(crate) proof fn lemma_comparison_dominance_64(c: int, other: int, k: nat)
+    requires 0 <= c < 10000000000000000int, 0 <= other < 10000000000000000int, k >= 16,
+    ensures
+        same_order(c * pow(10, 16), other, c * pow(10, k), other),
+        c * pow(10, 16) == 0 <==> c == 0,
+        c * pow(10, k) == 0 <==> c == 0,
+{
+    lemma_pow_increases(10, 16, k);
+    assert(pow(10, 16) == 10000000000000000int) by (compute_only);
+    if c > 0 {
+        assert(c * pow(10, k) >= 10000000000000000int) by (nonlinear_arith)
+            requires c > 0, pow(10, k) >= 10000000000000000int;
+    }
+}
+
+pub(crate) proof fn lemma_comparison_clamp_64(a: crate::layout::Unpacked, b: crate::layout::Unpacked, g: int)
+    requires
+        a.coeff < 10000000000000000int, b.coeff < 10000000000000000int,
+        g == if a.exp - b.exp < -16 { -16 } else if a.exp - b.exp > 16 { 16 } else { a.exp - b.exp },
+    ensures
+        same_order(
+            a.coeff * pow(10, (if g > 0 { g } else { 0 }) as nat),
+            b.coeff * pow(10, (if g < 0 { -g } else { 0 }) as nat),
+            a.coeff * pow(10, (a.exp - min_exp(a, b)) as nat),
+            b.coeff * pow(10, (b.exp - min_exp(a, b)) as nat)),
+{
+    lemma_pow0(10);
+    let d = a.exp - b.exp;
+    if d >= 16 {
+        lemma_comparison_dominance_64(a.coeff as int, b.coeff as int, d as nat);
+    } else if d <= -16 {
+        lemma_comparison_dominance_64(b.coeff as int, a.coeff as int, (-d) as nat);
+    }
+}
+
+pub(crate) proof fn lemma_comparison_signs(a: crate::layout::Unpacked, b: crate::layout::Unpacked, x: int, y: int)
+    requires
+        0 <= x, 0 <= y,
+        same_order(x, y, a.coeff * pow(10, (a.exp - min_exp(a, b)) as nat), b.coeff * pow(10, (b.exp - min_exp(a, b)) as nat)),
+        x == 0 <==> a.coeff == 0,
+        y == 0 <==> b.coeff == 0,
+    ensures
+        same_order(if a.neg { -x } else { x }, if b.neg { -y } else { y }, comparison_value(a, b), comparison_value(b, a)),
+        ((x == y) && (a.neg == b.neg || x == 0)) <==> comparison_value(a, b) == comparison_value(b, a),
+{
+    let ex = a.coeff * pow(10, (a.exp - min_exp(a, b)) as nat);
+    let ey = b.coeff * pow(10, (b.exp - min_exp(a, b)) as nat);
+    lemma_pow_positive(10, (a.exp - min_exp(a, b)) as nat);
+    lemma_pow_positive(10, (b.exp - min_exp(a, b)) as nat);
+    assert(ex >= 0 && (ex == 0 <==> a.coeff == 0)) by (nonlinear_arith)
+        requires ex == a.coeff * pow(10, (a.exp - min_exp(a, b)) as nat), a.coeff >= 0, pow(10, (a.exp - min_exp(a, b)) as nat) > 0;
+    assert(ey >= 0 && (ey == 0 <==> b.coeff == 0)) by (nonlinear_arith)
+        requires ey == b.coeff * pow(10, (b.exp - min_exp(a, b)) as nat), b.coeff >= 0, pow(10, (b.exp - min_exp(a, b)) as nat) > 0;
+}
+
+pub(crate) proof fn lemma_comparison_adjusted(a: crate::layout::Unpacked, b: crate::layout::Unpacked, da: nat, db: nat)
+    requires
+        1 <= da <= 34, 1 <= db <= 34,
+        pow(10, (da - 1) as nat) <= a.coeff < pow(10, da),
+        pow(10, (db - 1) as nat) <= b.coeff < pow(10, db),
+    ensures
+        a.exp + da < b.exp + db ==> a.coeff * pow(10, (a.exp - min_exp(a, b)) as nat) < b.coeff * pow(10, (b.exp - min_exp(a, b)) as nat),
+        a.exp + da > b.exp + db ==> a.coeff * pow(10, (a.exp - min_exp(a, b)) as nat) > b.coeff * pow(10, (b.exp - min_exp(a, b)) as nat),
+        a.exp + da == b.exp + db ==> -33 <= a.exp - b.exp <= 33,
+{
+    let ka = (a.exp - min_exp(a, b)) as nat;
+    let kb = (b.exp - min_exp(a, b)) as nat;
+    lemma_add_digit_scale(a.coeff as int, da, ka);
+    lemma_add_digit_scale(b.coeff as int, db, kb);
+    if a.exp + da < b.exp + db {
+        lemma_pow_increases(10, da + ka, (db + kb - 1) as nat);
+    } else if a.exp + da > b.exp + db {
+        lemma_pow_increases(10, db + kb, (da + ka - 1) as nat);
+    }
+}
+
+pub(crate) proof fn lemma_comparison_align_128(a: crate::layout::Unpacked, b: crate::layout::Unpacked, da: nat, db: nat)
+    requires
+        1 <= da <= 34, 1 <= db <= 34,
+        pow(10, (da - 1) as nat) <= a.coeff < pow(10, da),
+        pow(10, (db - 1) as nat) <= b.coeff < pow(10, db),
+        a.exp + da == b.exp + db,
+    ensures
+        -33 <= a.exp - b.exp <= 33,
+        0 < a.coeff * pow(10, (a.exp - min_exp(a, b)) as nat) < 10000000000000000000000000000000000int,
+        0 < b.coeff * pow(10, (b.exp - min_exp(a, b)) as nat) < 10000000000000000000000000000000000int,
+{
+    let ka = (a.exp - min_exp(a, b)) as nat;
+    let kb = (b.exp - min_exp(a, b)) as nat;
+    lemma_add_digit_scale(a.coeff as int, da, ka);
+    lemma_add_digit_scale(b.coeff as int, db, kb);
+    assert(da + ka <= 34 && db + kb <= 34);
+    lemma_pow_increases(10, da + ka, 34);
+    lemma_pow_increases(10, db + kb, 34);
+    assert(pow(10, 34) == 10000000000000000000000000000000000int) by (compute_only);
 }
 
 }

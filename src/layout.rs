@@ -517,6 +517,11 @@ macro_rules! bid_layout {
             let small_coeff_bits = <$width as Width>::LAYOUT.trail_bits + 3;
             #[cfg(verus_keep_ghost)]
             proof! {
+                if <$width as Width>::LAYOUT.digits == 34 {
+                    reveal(pow);
+                    assert(pow(10, 34) < (1u128 << 113) as int) by (compute_only);
+                    assert(coeff < (1 as <$width as Width>::Bits) << small_coeff_bits);
+                }
                 <$width>::lemma_encode(
                     value,
                     (<<$width as Width>::Bits>::BITS - 1) as u32,
@@ -525,7 +530,7 @@ macro_rules! bid_layout {
                     (<<$width as Width>::Bits>::BITS - 3) as u32,
                 );
             }
-            if coeff < 1 << small_coeff_bits {
+            if <$width as Width>::LAYOUT.digits == 34 || coeff < 1 << small_coeff_bits {
                 sign | (exp << small_coeff_bits) | coeff
             } else {
                 let large_coeff_bits = <$width as Width>::LAYOUT.trail_bits + 1;

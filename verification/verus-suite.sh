@@ -4,18 +4,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERUS_VERSION=0.2026.10.18.7d82994
-EXPECTED_VERIFIED=318
+EXPECTED_VERIFIED=382
 
 functions=(
     bidecimal::error::Error::clone
     bidecimal::kernel::add_sub
     bidecimal::kernel::add_sub_general
     bidecimal::kernel::canonical
+    bidecimal::kernel::clamped_magnitudes_64
+    bidecimal::kernel::cmp_64
+    bidecimal::kernel::cmp_128
+    bidecimal::kernel::cmp_wide_gap_128
     bidecimal::kernel::digits
     bidecimal::kernel::digits_64
     bidecimal::kernel::div_rem_pow10
     bidecimal::kernel::div_rem_pow10_64
     bidecimal::kernel::div_rem_scaled
+    bidecimal::kernel::eq_64
     bidecimal::kernel::exceeds_max
     bidecimal::kernel::fit
     bidecimal::kernel::is_largest_finite
@@ -64,6 +69,12 @@ functions=(
     bidecimal::layout::unpack_32
     bidecimal::layout::unpack_64
     bidecimal::layout::unpack_canonical_128
+    bidecimal::narrow::Finite64::clone
+    bidecimal::narrow::Finite64::view
+    bidecimal::narrow::add_sub_general
+    bidecimal::narrow::aligned
+    bidecimal::narrow::compressed
+    bidecimal::narrow::fit
     bidecimal::rounding::Rounding::clone
     bidecimal::tables::POW10
     bidecimal::tables::POW10_64
@@ -96,6 +107,8 @@ functions=(
     bidecimal::verus_model::ceil_result
     bidecimal::verus_model::clamp_exp
     bidecimal::verus_model::closest_exp
+    bidecimal::verus_model::comparison_result
+    bidecimal::verus_model::comparison_value
     bidecimal::verus_model::decimal_digits
     bidecimal::verus_model::digits_estimate_ok
     bidecimal::verus_model::digits_estimates_ok
@@ -118,6 +131,9 @@ functions=(
     bidecimal::verus_model::lemma_add_exact_sum
     bidecimal::verus_model::lemma_add_fast_scale
     bidecimal::verus_model::lemma_add_fit_transfer
+    bidecimal::verus_model::lemma_add_bit_scale
+    bidecimal::verus_model::lemma_add_pow10_bit_bound
+    bidecimal::verus_model::lemma_add_sum_bound
     bidecimal::verus_model::lemma_add_input
     bidecimal::verus_model::lemma_add_signed_product
     bidecimal::verus_model::lemma_add_signed_scale
@@ -127,6 +143,12 @@ functions=(
     bidecimal::verus_model::lemma_cancel_pow10
     bidecimal::verus_model::lemma_cancel_ten
     bidecimal::verus_model::lemma_ceil_fits
+    bidecimal::verus_model::lemma_comparison_adjusted
+    bidecimal::verus_model::lemma_comparison_align_128
+    bidecimal::verus_model::lemma_comparison_clamp_64
+    bidecimal::verus_model::lemma_comparison_dominance_64
+    bidecimal::verus_model::lemma_comparison_scale_64
+    bidecimal::verus_model::lemma_comparison_signs
     bidecimal::verus_model::lemma_decimal_digits
     bidecimal::verus_model::lemma_decimal_digits_le
     bidecimal::verus_model::lemma_digits_estimate
@@ -154,6 +176,16 @@ functions=(
     bidecimal::verus_model::lemma_long_divide_step
     bidecimal::verus_model::lemma_mul_below
     bidecimal::verus_model::lemma_mul_limbs
+    bidecimal::verus_model::lemma_narrow_align_scale
+    bidecimal::verus_model::lemma_narrow_cohort_order
+    bidecimal::verus_model::lemma_narrow_compress_bounds
+    bidecimal::verus_model::lemma_narrow_compress_model
+    bidecimal::verus_model::lemma_narrow_compress_scale
+    bidecimal::verus_model::lemma_narrow_finite_bound
+    bidecimal::verus_model::lemma_narrow_fit_split
+    bidecimal::verus_model::lemma_narrow_ok_excludes_error
+    bidecimal::verus_model::lemma_narrow_rounded_deterministic
+    bidecimal::verus_model::lemma_narrow_rounded_unique
     bidecimal::verus_model::lemma_odd_part_start
     bidecimal::verus_model::lemma_odd_part_step
     bidecimal::verus_model::lemma_overflow_low
@@ -199,6 +231,8 @@ functions=(
     bidecimal::verus_model::recip_spec
     bidecimal::verus_model::rounded
     bidecimal::verus_model::rounded_up
+    bidecimal::verus_model::same_order
+    bidecimal::verus_model::same_result
     bidecimal::verus_model::same_side
     bidecimal::verus_model::scaled_eq
     bidecimal::verus_model::scaled_le
