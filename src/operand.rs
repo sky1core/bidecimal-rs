@@ -15,6 +15,7 @@ pub(crate) mod sealed {
     }
 
     pub trait Sealed: Copy {
+        const IS_NARROW: bool;
         /// Returns `true` for an infinity or NaN.
         fn is_special(self) -> bool;
         /// The fields of a finite value; meaningless for an infinity or NaN.

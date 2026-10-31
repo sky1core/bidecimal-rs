@@ -184,8 +184,6 @@ macro_rules! comparison_proofs {
         fn $eq_name() {
             let a = any_unpacked::<$width>();
             let b = any_unpacked::<$width>();
-            let limit = (38 - <$width as Width>::LAYOUT.digits) as i32;
-            kani::assume((a.exp - b.exp).abs() <= limit);
             assert_eq!(eq::<$width>(a, b), cmp_general(a, b) == Ordering::Equal);
         }
 
@@ -194,18 +192,12 @@ macro_rules! comparison_proofs {
         fn $cmp_name() {
             let a = any_unpacked::<$width>();
             let b = any_unpacked::<$width>();
-            let limit = (38 - <$width as Width>::LAYOUT.digits) as i32;
-            kani::assume((a.exp - b.exp).abs() <= limit);
             assert_eq!(cmp::<$width>(a, b), cmp_general(a, b));
         }
     };
 }
 
-comparison_proofs!(
-    W32,
-    eq_bounded_32_matches_general,
-    cmp_bounded_32_matches_general
-);
+comparison_proofs!(W32, eq_32_matches_general, cmp_32_matches_general);
 
 macro_rules! comparison_gap_proofs {
     ($width:ty, $($name:ident = $gap:literal),* $(,)?) => {
@@ -224,11 +216,48 @@ macro_rules! comparison_gap_proofs {
     };
 }
 
-comparison_gap_proofs!(
-    W64,
-    bounded_64_gap_m22_matches_general = -22,
-    bounded_64_gap_p00_matches_general = 0,
-    bounded_64_gap_p22_matches_general = 22,
-);
+#[kani::proof]
+fn comparison_64_positive_dominance() {
+    let a = any_unpacked::<W64>();
+    let b = any_unpacked::<W64>();
+    kani::assume(a.exp - b.exp >= 16);
+    let order = if a.coeff != 0 {
+        if a.neg {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }
+    } else if b.coeff == 0 {
+        Ordering::Equal
+    } else if b.neg {
+        Ordering::Greater
+    } else {
+        Ordering::Less
+    };
+    assert_eq!(cmp::<W64>(a, b), order);
+    assert_eq!(eq::<W64>(a, b), a.coeff == 0 && b.coeff == 0);
+}
+
+#[kani::proof]
+fn comparison_64_negative_dominance() {
+    let a = any_unpacked::<W64>();
+    let b = any_unpacked::<W64>();
+    kani::assume(a.exp - b.exp <= -16);
+    let order = if b.coeff != 0 {
+        if b.neg {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }
+    } else if a.coeff == 0 {
+        Ordering::Equal
+    } else if a.neg {
+        Ordering::Greater
+    } else {
+        Ordering::Less
+    };
+    assert_eq!(cmp::<W64>(a, b), order.reverse());
+    assert_eq!(eq::<W64>(a, b), a.coeff == 0 && b.coeff == 0);
+}
 
 comparison_gap_proofs!(W128, bounded_128_gap_p00_matches_general = 0);

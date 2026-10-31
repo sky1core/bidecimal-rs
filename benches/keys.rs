@@ -122,6 +122,78 @@ fn cross<S: Number + PartialEq<L> + PartialOrd<L>, L: Number>(
     }
 }
 
+fn comparison32(c: &mut Criterion) {
+    let mut rng = SplitMix64(SEED);
+    for distribution in [
+        "fixed_exp",
+        "smallexp_pos",
+        "cohort_oneway",
+        "widegap",
+        "fixed_exp_pos",
+        "random_pos",
+        "widegap_pos",
+        "value_zero",
+    ] {
+        let specs: Vec<(Spec, Spec)> = (0..COUNT)
+            .map(|_| {
+                if distribution == "value_zero" {
+                    let mut a = rng.spec(7);
+                    a.neg = rng.below(8) == 0;
+                    let b = rng.zero();
+                    return if rng.next() & 1 == 0 { (a, b) } else { (b, a) };
+                }
+                if distribution == "cohort_oneway" {
+                    let a = rng.spec(5);
+                    return (a, a.form(1 + rng.below(2) as u32));
+                }
+                let mut a = rng.spec(7);
+                let mut b = rng.spec(7);
+                match distribution {
+                    "fixed_exp" | "fixed_exp_pos" => {
+                        a.exp = -4;
+                        b.exp = -4;
+                    }
+                    "smallexp_pos" => {
+                        a.exp = -(rng.below(5) as i32);
+                        b.exp = -(rng.below(5) as i32);
+                        a.neg = false;
+                        b.neg = false;
+                    }
+                    "widegap" | "widegap_pos" => {
+                        a.exp = rng.below(111) as i32 - 20;
+                        b.exp = rng.below(111) as i32 - 20;
+                    }
+                    "random_pos" => {}
+                    _ => unreachable!(),
+                }
+                if matches!(distribution, "fixed_exp_pos" | "random_pos" | "widegap_pos") {
+                    a.neg = false;
+                    b.neg = false;
+                }
+                (a, b)
+            })
+            .collect();
+        let values: Vec<(Decimal32, Decimal32)> =
+            specs.iter().map(|(a, b)| (a.parse(), b.parse())).collect();
+        let keys: Vec<_> = values.iter().map(|&(a, b)| (key(a), key(b))).collect();
+        for ((a, b), &(x, y)) in specs.iter().zip(&values) {
+            let order = a.value().cmp(&b.value());
+            assert_eq!(x == y, order == Ordering::Equal);
+            assert_eq!(x.partial_cmp(&y), Some(order));
+            assert_eq!(key(x).cmp(&key(y)), order);
+        }
+        per_element(c, &format!("eq_d32_{distribution}"), &values, |(a, b)| {
+            a == b
+        });
+        per_element(c, &format!("cmp_d32_{distribution}"), &values, |(a, b)| {
+            a.partial_cmp(b)
+        });
+        per_element(c, &format!("keycmp_d32_{distribution}"), &keys, |(a, b)| {
+            a.cmp(b)
+        });
+    }
+}
+
 fn keys(c: &mut Criterion) {
     println!("WORKLOAD seed={SEED:#x} count={COUNT} sizes={SIZES:?}");
     let mut rng = SplitMix64(SEED);
@@ -131,6 +203,7 @@ fn keys(c: &mut Criterion) {
     cross::<Decimal32, Decimal64>(c, &mut rng);
     cross::<Decimal32, Decimal128>(c, &mut rng);
     cross::<Decimal64, Decimal128>(c, &mut rng);
+    comparison32(c);
 }
 
 criterion_group! { name = benches; config = Criterion::default()

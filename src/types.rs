@@ -18,6 +18,29 @@ use crate::operand::sealed::{Class, Sealed};
 use crate::ordered::sealed::Keyed;
 use crate::{Error, Operand, Rounding};
 
+#[inline]
+fn add_sub_general<W: Width, A: Operand, B: Operand, const SUBTRACT: bool>(
+    x: Unpacked,
+    y: Unpacked,
+    dir: Option<Rounding>,
+) -> Result<InRange<W>, Error> {
+    if W::LAYOUT.digits < 34 && A::IS_NARROW && B::IS_NARROW {
+        crate::narrow::add_sub_general::<W>(x, y, SUBTRACT, dir)
+    } else {
+        kernel::add_sub_general::<W>(x, y, SUBTRACT, dir)
+    }
+}
+
+#[cfg(not(verus_keep_ghost))]
+const _: () = {
+    assert!(<Decimal32 as Sealed>::IS_NARROW);
+    assert!(<Decimal64 as Sealed>::IS_NARROW);
+    assert!(!<Decimal128 as Sealed>::IS_NARROW);
+    assert!(W32::LAYOUT.digits < 34);
+    assert!(W64::LAYOUT.digits < 34);
+    assert!(W128::LAYOUT.digits >= 34);
+};
+
 /// Formats a value with trailing fractional zeros removed.
 ///
 /// Returned by `stripped` on each decimal type. `Display` and `Debug` write
@@ -136,6 +159,7 @@ macro_rules! decimal_type {
             const NAN_BITS: $bits = 0b11111 << (<$bits>::BITS - 6);
             const SIGNALING_BIT: $bits = 1 << (<$bits>::BITS - 7);
             const PAYLOAD_MASK: $bits = (1 << <$width as Width>::LAYOUT.trail_bits) - 1;
+            const COEFFICIENT_MASK: $bits = (1 << (<$width as Width>::LAYOUT.trail_bits + 3)) - 1;
             const MAX_PAYLOAD: $bits = (10_u128.pow(Self::DIGITS - 1) - 1) as $bits;
             const EMIN: i32 = Self::MIN_EXP + Self::DIGITS as i32 - 1;
 
@@ -325,8 +349,9 @@ macro_rules! decimal_type {
             }
 
             /// Returns `true` for a zero of either sign.
-            pub fn is_zero(self) -> bool {
-                matches!(self.class(), Class::Finite(v) if v.coeff == 0)
+            pub const fn is_zero(self) -> bool {
+                let form_mask = (Self::SIGN_BIT >> 1) | (Self::SIGN_BIT >> 2);
+                (self.0 & form_mask != form_mask) & (self.0 & Self::COEFFICIENT_MASK == 0)
             }
 
             /// Returns `true` if the value is greater than zero. Zeros of
@@ -393,7 +418,7 @@ macro_rules! decimal_type {
             /// - Otherwise [`Error::Inexact`] if the exact sum is not
             ///   representable.
             pub fn add(a: impl Operand, b: impl Operand) -> Result<Self, Error> {
-                Self::add_sub(a, b, false, None)
+                Self::add_sub::<false, _, _>(a, b, None)
             }
 
             #[doc = concat!("Returns the sum `a + b` as a `", stringify!($name), "`, rounded in direction `dir` if the exact sum is not representable.")]
@@ -422,7 +447,7 @@ macro_rules! decimal_type {
                 b: impl Operand,
                 dir: Rounding,
             ) -> Result<Self, Error> {
-                Self::add_sub(a, b, false, Some(dir))
+                Self::add_sub::<false, _, _>(a, b, Some(dir))
             }
 
             #[doc = concat!("Returns the exact difference `a - b` as a `", stringify!($name), "`.")]
@@ -445,7 +470,7 @@ macro_rules! decimal_type {
             /// - Otherwise [`Error::Inexact`] if the exact difference is not
             ///   representable.
             pub fn sub(a: impl Operand, b: impl Operand) -> Result<Self, Error> {
-                Self::add_sub(a, b, true, None)
+                Self::add_sub::<true, _, _>(a, b, None)
             }
 
             #[doc = concat!("Returns the difference `a - b` as a `", stringify!($name), "`, rounded in direction `dir` if the exact difference is not representable.")]
@@ -474,37 +499,75 @@ macro_rules! decimal_type {
                 b: impl Operand,
                 dir: Rounding,
             ) -> Result<Self, Error> {
-                Self::add_sub(a, b, true, Some(dir))
+                Self::add_sub::<true, _, _>(a, b, Some(dir))
             }
 
             #[inline(always)]
-            fn add_sub(
-                a: impl Operand,
-                b: impl Operand,
-                subtract: bool,
+            fn add_sub<const SUBTRACT: bool, A: Operand, B: Operand>(
+                a: A,
+                b: B,
                 dir: Option<Rounding>,
             ) -> Result<Self, Error> {
-                if (a.is_special() | b.is_special())
-                    && let Some(special) = Self::add_sub_special(a, b, subtract)
+                if <$width>::LAYOUT.digits < 34 && dir.is_some() {
+                    if (a.is_special() | b.is_special())
+                        && let Some(special) = Self::add_sub_special(a, b, SUBTRACT)
+                    {
+                        return Ok(special);
+                    }
+                    let x = a.unpack();
+                    let y = b.unpack();
+                    let value = if let Some(v) = kernel::add_sub::<$width>(x, y, SUBTRACT, dir) {
+                        v
+                    } else {
+                        match add_sub_general::<$width, A, B, SUBTRACT>(x, y, dir) {
+                            Ok(v) => v,
+                            Err(Error::Overflow) => {
+                                return Self::add_sub_overflow::<SUBTRACT>(a, b, dir);
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    };
+                    return Ok(Self(layout::$encode(value)));
+                }
+                let value = if !(a.is_special() | b.is_special())
+                    && let Some(v) = kernel::add_sub::<$width>(a.unpack(), b.unpack(), SUBTRACT, dir)
                 {
-                    return Ok(special);
-                }
-                match kernel::add_sub::<$width>(a.unpack(), b.unpack(), subtract, dir) {
-                    Ok(v) => Ok(Self(layout::$encode(v))),
-                    Err(Error::Overflow) => Self::add_sub_overflow(a, b, subtract, dir),
-                    Err(e) => Err(e),
-                }
+                    Self(layout::$encode(v))
+                } else {
+                    Self::add_sub_slow::<SUBTRACT, _, _>(a, b, dir)?
+                };
+                Ok(value)
             }
 
             #[cold]
             #[inline(never)]
-            fn add_sub_overflow(
+            fn add_sub_overflow<const SUBTRACT: bool>(
                 a: impl Operand,
                 b: impl Operand,
-                subtract: bool,
                 dir: Option<Rounding>,
             ) -> Result<Self, Error> {
-                Self::overflow(sum_is_negative(a.unpack(), b.unpack(), subtract), dir)
+                Self::overflow(sum_is_negative(a.unpack(), b.unpack(), SUBTRACT), dir)
+            }
+
+            #[cold]
+            #[inline(never)]
+            fn add_sub_slow<const SUBTRACT: bool, A: Operand, B: Operand>(
+                a: A,
+                b: B,
+                dir: Option<Rounding>,
+            ) -> Result<Self, Error> {
+                if (a.is_special() | b.is_special())
+                    && let Some(special) = Self::add_sub_special(a, b, SUBTRACT)
+                {
+                    return Ok(special);
+                }
+                let x = a.unpack();
+                let y = b.unpack();
+                match add_sub_general::<$width, A, B, SUBTRACT>(x, y, dir) {
+                    Ok(v) => Ok(Self(layout::$encode(v))),
+                    Err(Error::Overflow) => Self::overflow(sum_is_negative(x, y, SUBTRACT), dir),
+                    Err(e) => Err(e),
+                }
             }
 
             /// The result when an operand is an infinity or NaN; `None` for finite operands.
@@ -947,6 +1010,8 @@ macro_rules! decimal_type {
         }
 
         impl Sealed for $name {
+            const IS_NARROW: bool = <$width>::LAYOUT.digits < 34;
+
             fn is_special(self) -> bool {
                 $name::is_special(self)
             }
@@ -1102,7 +1167,7 @@ decimal_type!(
     16,
     W128,
     decode_128,
-    unpack_128,
+    unpack_canonical_128,
     unpack_canonical_128,
     encode_128,
     parse: parse,

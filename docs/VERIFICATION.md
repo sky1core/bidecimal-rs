@@ -36,12 +36,33 @@ After special classification, unpacking a finite value has coefficient
 `0 <= c < 10^P` and `qmin <= q <= qmax`. Widening preserves these fields and
 embeds both source intervals in the destination intervals.
 
+The `narrow` module replaces only general finite addition/subtraction
+computation for Decimal32/Decimal64 operand pairs and Decimal32/Decimal64
+results. One internal function selects the general kernel; the sealed
+operand constants and result precision select exactly these eight width
+combinations. Compile-time assertions check the constants for all three
+operand types and the result condition for all three formats. All widths
+retain the bounded wide exact path and the existing special and overflow
+dispatch. Decimal128 operands or results use wide general computation.
+
+The native general function accepts the same `Unpacked` operands and returns
+`Result<InRange<W>, Error>` as the wide general function. Verus verifies its
+complete finite domain, including exact `u64` conversion, 18-digit signed
+alignment, trailing-zero retry, precision-plus-one sticky compression,
+64-bit fitting and transfer to wide general on decline. Both kernels satisfy
+the same mathematical-integer rounding contract. The proved
+`lemma_narrow_rounded_unique` establishes that this contract determines the
+same value fields or error kind; the native entry point also guarantees
+agreement with every result satisfying that contract. No new trusted
+standard-library specification is used. Public dispatch, finite extraction
+and encoding, and overflow mapping remain outside this Verus proof.
+
 ## Infinity and NaN
 
 `src/operand.rs` seals `is_special`, `class` and finite `unpack` to the three
 decimal types. Their implementations in `src/types.rs` classify validated
 storage as finite, infinity or NaN. Public arithmetic checks `is_special`
-before unpacking; `add_sub_special`, `mul_special` and `div_special` match
+before finite arithmetic; `add_sub_special`, `mul_special` and `div_special` match
 the operand classes. Finite pairs reach the finite kernels with
 the coefficient and exponent bounds above, except that public division
 handles a zero divisor first: zero/zero gives `NAN`, and nonzero/zero gives
@@ -73,9 +94,9 @@ case-insensitive `inf`, `infinity` and `nan` after finite parsing rejects the
 syntax. Public formatting classifies before `display::fmt`: infinities are
 `inf`/`-inf`, and NaNs are `NaN` without sign or payload.
 
-Numeric equality and `partial_cmp` classify special operands before finite
-comparison, with an identical-bit shortcut that still rejects NaNs. NaNs are
-unequal and unordered; infinities bracket finite values. `total_cmp` also
+Numeric equality and `partial_cmp` handle NaNs as unequal and unordered;
+infinities bracket finite values. Decimal32/Decimal64 identical-bit shortcuts
+retain these class rules. `total_cmp` also
 uses class, sign, finite cohort exponent, NaN signaling bit and payload.
 `src/ordered.rs` instead orders keys as -infinity < finite < +infinity < NaN,
 merging all NaNs and numerically equal finite values, including signed zeros.
@@ -222,9 +243,9 @@ proof-result files are committed.
 ### Direct Kani harnesses
 
 The harnesses in `src/layout_proofs.rs`, `src/kernel_proofs.rs` and
-`src/parse_proofs.rs` are compiled only under `cfg(kani)`. The current source
-passed all 62 harnesses listed by the suite with two parallel jobs, using
-Kani 0.68.0 (CBMC 6.11.0, nightly-2026-08-21) on aarch64 macOS.
+`src/parse_proofs.rs` are compiled only under `cfg(kani)`. The suite lists
+64 harnesses and uses Kani 0.68.0 (CBMC 6.11.0, nightly-2026-08-21)
+on aarch64 macOS.
 Each row is a direct proof of the Rust code over the stated domain and nothing
 more. The files contain only the harnesses listed in the two tables below.
 
@@ -248,7 +269,8 @@ The harnesses in this first table use no stub.
 | `layout_proofs::encode_32_round_trips_every_in_range_field`, `layout_proofs::encode_64_round_trips_every_in_range_field`, `layout_proofs::encode_128_round_trips_every_in_range_field` | every sign, coefficient `c<10^P` and exponent in `qmin..=qmax` | The checked constructor accepts the fields, and encoding then decoding returns the same fields. | Kani 0.68.0 / CBMC 6.11.0 |
 | `layout_proofs::in_range_32_accepts_exactly_the_layout_bounds`, `layout_proofs::in_range_64_accepts_exactly_the_layout_bounds`, `layout_proofs::in_range_128_accepts_exactly_the_layout_bounds` | every sign, `u128` coefficient and `i128` exponent | The checked constructor accepts exactly the interchange-format bounds and keeps the fields unchanged. | Kani 0.68.0 / CBMC 6.11.0 |
 | `layout_proofs::public_storage_32_matches_decode`, `layout_proofs::public_storage_64_matches_decode`, `layout_proofs::public_storage_128_matches_decode` | every bit pattern | `from_bits` accepts exactly finite-decodable or independently canonical special patterns and preserves their bits. Finite `class` fields and zero/positive/negative tests agree with decoding. Accepted specials have a non-finite `class`, are neither zero nor finite, and `is_nan` agrees with the combination field. | Kani 0.68.0 / CBMC 6.11.0 |
-| `layout_proofs::unpack_canonical_128_matches_decode` | every finite canonical `u128` pattern | The unchecked Decimal128 unpacking agrees with decoding. | Kani 0.68.0 / CBMC 6.11.0 |
+| `layout_proofs::is_zero_32_matches_class`, `layout_proofs::is_zero_64_matches_class`, `layout_proofs::is_zero_128_matches_class` | every bit pattern accepted by `from_bits` of the named width | The direct stored-bit `is_zero` test equals `matches!(class(), Class::Finite(v) if v.coeff == 0)`, including both zero signs, every cohort, infinities and NaNs. No stub is used. | Kani 0.68.0 / CBMC 6.11.0 |
+| `layout_proofs::unpack_canonical_128_matches_decode` | every finite canonical `u128` pattern | Both canonical Decimal128 extraction and the sealed operand unpacking used by arithmetic agree with decoding; public construction accepts these bits. | Kani 0.68.0 / CBMC 6.11.0 |
 | `layout_proofs::constants_encode_their_fields` | `ZERO`, `MAX`, `MIN`, `NAN`, `INFINITY` and `NEG_INFINITY` of each width | Finite constants have the expected fields; special constants have the independently specified canonical bits. | Kani 0.68.0 / CBMC 6.11.0 |
 | `layout_proofs::widen_32_to_64_and_narrow_back`, `layout_proofs::widen_32_to_128_and_narrow_back`, `layout_proofs::widen_64_to_128_and_narrow_back` | every accepted bit pattern of the narrower width, both directions | Finite widening preserves decoded fields and narrowing returns the original bits. Special widening matches independently computed destination bits, preserves NaN/infinity classification and sign, and checked and directed narrowing return the original bits with the signaling bit cleared. | Kani 0.68.0 / CBMC 6.11.0 |
 | `kernel::proofs::power_tables_are_powers_of_ten` | every table index | `pow10(k)=10^k` for `k<=38` and `pow10_64(k)=10^k` for `k<=19`. | Kani 0.68.0 / CBMC 6.11.0 |
@@ -258,8 +280,9 @@ The harnesses in this first table use no stub.
 | `kernel::proofs::div_rem_pow10_64_k15` through `kernel::proofs::div_rem_pow10_64_k19` | `x<2^63`, the named `k` only | `x=q*10^k+r` and `r<10^k`. | Kani 0.68.0 / CBMC 6.11.0 |
 | `kernel::proofs::strip_trailing_zeros_64_zero`, `kernel::proofs::strip_trailing_zeros_64_z15` | zero; and `unit*10^15` with `unit` not a multiple of ten and `unit<10` | The result is `(0, 0)`, respectively `(unit, 15)`. | Kani 0.68.0 / CBMC 6.11.0 |
 | `kernel::proofs::zero_sign_follows_exact_zero_rule` | both operand signs, no direction and both directions | The sign of an exact zero result follows the stated rule. | Kani 0.68.0 / CBMC 6.11.0 |
-| `kernel::proofs::eq_bounded_32_matches_general`, `kernel::proofs::cmp_bounded_32_matches_general` | finite canonical Decimal32 operands (`P=7`), every `abs(gap)<=31` | The bounded `eq`/`cmp` agree with `cmp_general`. This covers the whole bounded domain for `P=7`. | Kani 0.68.0 / CBMC 6.11.0 |
-| `kernel::proofs::bounded_64_gap_m22_matches_general`, `kernel::proofs::bounded_64_gap_p00_matches_general`, `kernel::proofs::bounded_64_gap_p22_matches_general`, `kernel::proofs::bounded_128_gap_p00_matches_general` | finite canonical operands of the named width, the named gap only | The bounded `eq` and `cmp` agree with `cmp_general`. These gaps do not cover the bounded domain for `P=16` or `P=34`. | Kani 0.68.0 / CBMC 6.11.0 |
+| `kernel::proofs::eq_32_matches_general`, `kernel::proofs::cmp_32_matches_general` | finite canonical Decimal32 operands (`P=7`), every exponent pair in `-101..=90`, with no gap restriction | The equal-exponent and clamped `eq`/`cmp` paths agree with `cmp_general` over the whole finite canonical Decimal32 domain. | Kani 0.68.0 / CBMC 6.11.0 |
+| `kernel::proofs::comparison_64_negative_dominance`, `kernel::proofs::comparison_64_positive_dominance` | finite canonical W64 operands, every exponent pair with gap `<=-16` or `>=16`, respectively | A nonzero larger-exponent coefficient dominates; its sign decides order and equality is false. A zero there compares as zero with the other signed operand, with both zero signs equal. These retain an independent numeric check through the generic W64 entry points after extraction of the Verus-proved functions; they are not needed to complete the whole-domain Verus proof. | Kani 0.68.0 / CBMC 6.11.0 |
+| `kernel::proofs::bounded_128_gap_p00_matches_general` | finite canonical Decimal128 operands, gap 0 only | P=34 equality and ordering agree with the Kani-only `cmp_general` at gap 0. Retained as an independent reference-agreement check for equality, which the new ordering proof does not cover; it is not a whole-domain equality proof. | Kani 0.68.0 / CBMC 6.11.0 |
 | `parse::proofs::zero_lanes_marks_exactly_the_zero_bytes` | every `u64` | The mark is `0x80` exactly in the zero byte lanes. | Kani 0.68.0 / CBMC 6.11.0 |
 | `parse::proofs::parse_eight_reads_eight_ascii_digits` | every 8-byte array | The result is the decimal value when all bytes are ASCII digits and `None` otherwise. | Kani 0.68.0 / CBMC 6.11.0 |
 | `parse::proofs::load_short_len0` through `parse::proofs::load_short_len8` | every byte slice of length 0 to 8; together these lengths are every length its callers pass | The bytes are loaded little-endian into the low lanes. | Kani 0.68.0 / CBMC 6.11.0 |
@@ -341,7 +364,17 @@ callers it is unproven. The obligations table below lists this as an open obliga
 | `kernel::is_largest_finite` | `W` is one of the three formats | True exactly when `q=qmax` and `c=10^P-1`. |
 | `kernel::exceeds_max` | `W` is one of the three formats; `c<=10^P-1` | True exactly when `q=qmax` and either `c=10^P-1`, or `d<=38` and `t>(10^P-1-c)*10^d`. |
 | `kernel::fit` | `W` is one of the three formats; `c<2^127`; every `i64` exponent `q` and preference, with `pref<=q` when `c>0`; `c>=10^(P-1)` when sticky; no direction and both directions | `Ok(r)` has the input sign. With no direction, `r=X`. With a direction, `r` is the least value `>=X` when the direction rounds the magnitude up (toward positive for a positive input, toward negative for a negative one), and otherwise the greatest value `<=X`, among all values with a coefficient below `10^P` and an exponent at least `qmin`. When `r=X`, its exponent is the one in its cohort closest to `clamp(pref, qmin, qmax)`; otherwise it is the least possible exponent. `Err(Overflow)` only when `X>=10^P*10^qmax` for a direction that rounds the magnitude down, and otherwise only when `X>(10^P-1)*10^qmax`. `Err(Inexact)` only with no direction, `X<=(10^P-1)*10^qmax`, and no in-range value equal to `X`. No other error is returned. |
-| `kernel::add_sub`, `kernel::add_sub_general` | `W` is one of the three formats; both operands in the Decimal128 range (`c<10^34`, `-6176<=q<=6111`), which contains every finite canonical operand of every width; addition and subtraction; no direction and both directions | Let `S` be the exact sum or difference as an integer at the smaller operand exponent `F`. The result has the properties of the `fit` row for `X=\|S\|*10^F` and preference `F`, with the sign of `S`; an exact zero `S` is negative for two negative effective signs, positive for two positive ones, and otherwise negative exactly toward negative (IEEE 754-2019 6.3). |
+| `kernel::clamped_magnitudes_64` | both coefficients below `10^16`, both exponents in `-398..=369`, every sign | Clamping the exponent difference to `[-16,16]` and widening the u64 factors before multiplication returns magnitudes below `10^32`, preserves their zero classifications and preserves the order and equality of the exact magnitudes at the smaller original exponent. |
+| `kernel::eq_64`, `kernel::cmp_64` | the same full finite W64 domain, including narrower operands | With `m=min(a.exp,b.exp)`, equality is true exactly when the mathematical integers `sign(a)*a.coeff*10^(a.exp-m)` and `sign(b)*b.coeff*10^(b.exp-m)` are equal, and ordering is their integer order. Both zero signs are equal. |
+| `kernel::cmp_128` | both coefficients below `10^34`, both exponents in `-6176..=6111`, every sign, including narrower operands compared at W128 | Its result is the order of the exact signed integers at `m=min(a.exp,b.exp)`, over the whole finite canonical W128 domain, including signed zeros. Gaps of magnitude at most four align signed i128 coefficients with one exact product below `10^38`, including all signs and zeros. Larger gaps delegate to `cmp_wide_gap_128`. |
+| `kernel::cmp_wide_gap_128` | both coefficients below `10^34`, both exponents in `-6176..=6111`, every sign and exponent gap, including signed zeros | Its result is the exact signed integer order at `m=min(a.exp,b.exp)`. Effective signs and zeros decide first. Nonzero same-sign operands use adjusted exponents; when these agree, the single exact magnitude alignment product is below `10^34`. |
+| `kernel::add_sub` | `W` is one of the three formats; both operands in the Decimal128 range (`c<10^34`, `-6176<=q<=6111`), which contains every finite canonical operand of every width; addition and subtraction; no direction and both directions | `None` leaves the input to the complete general kernel. Let `S` be the exact sum or difference as an integer at the smaller operand exponent `F`. A `Some` result has the properties of the `fit` row for `X=\|S\|*10^F` and preference `F`, with the sign of `S`; an exact zero `S` is negative for two negative effective signs, positive for two positive ones, and otherwise negative exactly toward negative (IEEE 754-2019 6.3). |
+| `kernel::add_sub_general` | `W` is one of the three formats; both operands in the Decimal128 range (`c<10^34`, `-6176<=q<=6111`), which contains every finite canonical operand of every width; addition and subtraction; no direction and both directions | Let `S` be the exact sum or difference as an integer at the smaller operand exponent `F`. The result has the properties of the `fit` row for `X=\|S\|*10^F` and preference `F`, with the sign of `S`; an exact zero `S` is negative for two negative effective signs, positive for two positive ones, and otherwise negative exactly toward negative (IEEE 754-2019 6.3). |
+| `narrow::aligned` | effective operand signs, `c<10^16`, exponents in `-398..=369`, either exact-zero sign | `Some` exactly when the exponent distance is at most 18 and the high-exponent coefficient is below `10^(18-distance)`. Its coefficient is the absolute exact signed sum at the smaller exponent, below `10^18+10^16`; its sign follows the sum and supplied exact-zero sign, and sticky is false. |
+| `narrow::compressed` | W32/W64 results; nonzero coefficients below `10^16`; `-398<=qb<=qa<=369`; preference `qb`; exact-zero sign selected from both effective signs and direction | Trailing-zero removal capped at the gap preserves the exact sum and original preference. A successful retry or compression has the complete general-addition contract. Compression has gap at least two after scaling, positive remainder, exact borrow, coefficient below `2^63` and at least `10^(P-1)`, and a same-side relation that preserves the one-rounding fit result. Decline requires the high coefficient to be at least `10^P`, or the low coefficient still to be at least `10^P` after its trailing zeros are removed up to the gap. |
+| `narrow::fit` | W32/W64 results; `c<2^63`; exponent and preference in `-398..=369`; `pref<=q` for nonzero `c`; sticky implies `c>=10^(P-1)`; all three modes | The full `kernel::fit` contract above, including sign, single directed rounding, preferred/least exponent, carry, underflow, overflow and exact error classification. The uncapped 64-bit quotient/remainder is connected to the existing fit lemmas by `lemma_narrow_fit_split`. |
+| `narrow::add_sub_general` | W32/W64 results; both operands in the Decimal64 range (`c<10^16`, `-398<=q<=369`), containing all canonical Decimal32/Decimal64 pairs; either subtract flag; all three modes | The full `kernel::add_sub_general` contract above, plus agreement in every value field or error kind with every result satisfying that contract. This includes exact coefficient conversion, exact-zero sign, original preference and passing the original operands, subtract flag and direction to wide general when compression declines. |
+| `verus_model::lemma_narrow_rounded_unique`, `lemma_narrow_rounded_deterministic` | any two results satisfying `rounded` for the same format, sign, integer magnitude, exponent, preference and direction | Their successful results have identical sign, coefficient and exponent; their errors have the same kind. The proof includes cohort uniqueness and exclusion of success/error and different-error pairs. |
 | `kernel::div_rem_scaled` | `a<10^34`, `0<b<10^34`, every `u32 k` with `a*10^k<b*10^35` | It returns `(q, r)` with `q=floor(a*10^k/b)` and `r=(a*10^k) mod b`, by long division in chunks of at most `38-digits(b)` digits. |
 | `kernel::div_rem_pow10` | every `x<2^127` and every `u32 k` | It returns `(q, r)` with `x=q*10^k+r` and `r<10^k`. This covers the identity branch `k=0`, the quotient-zero branch `k>=39` and every reciprocal branch `1<=k<=38`. |
 | `kernel::div_rem_pow10_64` | every `x<2^63` and every `u32 k` | The same property, with the quotient-zero branch `k>=20` and the reciprocal branches `1<=k<=19`. |
@@ -433,9 +466,10 @@ Other trusted assumptions:
   annotations; the proof does not cover the generated machine code.
 
 Not covered by Verus: the remaining `kernel` helpers, including `mul`,
-`div`, `quantize`, the multiple rounding paths, `cmp_mag`, `eq`, `cmp` and their general
-paths; the parsers and formatter; and the public types' methods and conversions, including
-the widening `From` implementations. Their evidence is listed elsewhere in this document.
+`div`, `quantize` and the multiple rounding paths; P=7 equality/ordering,
+P=34 equality and the Kani-only `cmp_mag`/`cmp_general` reference; the parsers
+and formatter; and the public types' methods and conversions, including the
+widening `From` implementations. Their evidence is listed elsewhere here.
 
 ### Obligations without a direct machine proof
 
@@ -446,11 +480,12 @@ retained evidence is not a substitute for a proof.
 
 | Family and exact required domain | What is unproven and why it is hard | Retained evidence |
 |---|---|---|
+| Composition of native general addition/subtraction with public dispatch: every canonical operand pair and result width, specials and all three modes | The native finite computation itself is proved above. Its public callers still must establish finite canonical inputs and select the appropriate format; the compile-time assertions prove the eight-width selection, but not runtime extraction, special handling, encoding or public overflow mapping. The public type methods and the common general-kernel selector are not verified by Verus. | The sealed operand implementations and selection assertions, canonical-storage proofs, `addsub_all_27_coefficient_gap_sign_classes`, exact/compression boundary tests and independent BigInt differentials. |
 | Special-value dispatch and results: all canonical operands, width combinations, modes, quantize targets, multiple steps and parsing/formatting inputs | Public class dispatch, NaN selection/quieting/payload fitting, invalid-operation results, zero-divisor results, directed overflow mapping, total comparison and OrderedDecimal key semantics have no full-domain direct proof. Kani covers special storage, constants and widening/narrowing back only; the finite Verus proofs assume their finite preconditions. | The Infinity and NaN source argument, every test in `src/special_tests.rs`, special branches of the four Decimal32 exhaustive tests, and the independent finite differentials. |
 | Caller preconditions of the representation rows: every call from production code that Verus does not verify of `InRange::checked`, `InRange::unchecked`, `unpack_canonical_128`, `canonical`, `is_largest_finite` and `exceeds_max` | Unproven: `checked`, `unchecked`, `is_largest_finite` and `exceeds_max` need `W` to be one of the three formats; `unchecked` also needs the value in range; `unpack_canonical_128` needs a finite canonical encoding; `canonical` needs `c<2^127` and `q<=2^31-39`; `exceeds_max` needs `c<=10^P-1`. The callers (the public types' constants and methods, `mul`, `quantize`, the multiple rounding paths and the parsers `parse_32`, `parse_64`, `parse_chunks` and `parse_general`) are not verified. | `Width` is sealed and implemented only by the three formats; finite storage comes from validated finite bits or `encode`; special storage is classified before finite extraction; the value-range argument recorded at each caller; the Kani harnesses and tests that exercise those callers. |
-| Caller preconditions of the Verus-proved helpers: every call from production code that Verus does not verify of `div_rem_pow10`, `div_rem_pow10_64`, `div_rem_scaled`, `strip_trailing_zeros`, `strip_trailing_zeros_64`, `scaled_rem`, `scaled_is_multiple`, `fit` and `add_sub` | Unproven: each caller must establish the helper's precondition (`requires`), and the Verus proofs above assume it; for `fit` this is the format, `c<2^127`, `pref<=q` for nonzero `c` and `c>=10^(P-1)` when sticky; for `add_sub` it is the format and both operands in the Decimal128 range; for `div_rem_scaled` it is `a<10^34`, `0<b<10^34` and `a*10^k<b*10^35`. The hard point is that the callers (the public types' addition and subtraction methods, `mul_general`, `div`, `quantize`, `round_to_multiple`, `round_to_unit_multiple_64`, `round_to_multiple_general`, `parse_general` and `narrow`) are not verified. | The value-range argument recorded at each caller (the `clippy::arithmetic_side_effects` reason), the Kani harnesses and tests that exercise those callers, and the caller arguments below. |
-| Bounded `eq`/`cmp`: finite canonical operands, `P=max(source precisions)`, coefficients below `10^P`, `abs(gap)<=38-P` | Numeric correctness of equality and ordering for every precision and gap. Agreement with `cmp_general` is proved for `P=7` over every gap, for `P=16` at gaps -22, 0 and 22, and for `P=34` at gap 0; agreement does not establish numeric correctness, because `cmp_general` itself has no direct proof. The hard point is symbolic wide multiplication of the scaled coefficient; a proof for individual gaps cannot stand for all gaps or widths. | The signed/unsigned alignment bounds below, `comparison_alignment_boundaries_all_width_pairs`, and `comparison_extreme_exponents_all_width_pairs`. |
-| `eq_general`/`cmp_general`: finite canonical operands in the complementary dispatch domain `abs(gap)>38-P` | Numeric correctness of equality and ordering in this domain. `cmp_general` is also the reference that the bounded harnesses compare against, and its numeric correctness has no direct proof on any domain. The hard points are symbolic wide multiplication and the exponent-dependent paths. `eq_general` is not specified for gap zero; a standalone harness must preserve its caller's domain. | The general comparison argument below and `comparison_exponent_gap_digit_guard_and_sign_classes`, plus the cross-width alignment/extreme-exponent tests. |
+| Caller preconditions of the Verus-proved helpers: every call from production code that Verus does not verify of `div_rem_pow10`, `div_rem_pow10_64`, `div_rem_scaled`, `strip_trailing_zeros`, `strip_trailing_zeros_64`, `scaled_rem`, `scaled_is_multiple`, `fit`, `add_sub`, `add_sub_general`, the `narrow` entry point and the W64/W128 comparison entry points | Unproven: each caller must establish the helper's precondition (`requires`), and the Verus proofs above assume it; for `fit` this is the format, `c<2^127`, `pref<=q` for nonzero `c` and `c>=10^(P-1)` when sticky; for `add_sub` and `add_sub_general` it is the format and both operands in the Decimal128 range; for the `narrow` entry point it is a W32/W64 result and both operands in the Decimal64 range; for W64/W128 comparison it is both operands in the corresponding range, established by unverified public dispatch and decoding; for `div_rem_scaled` it is `a<10^34`, `0<b<10^34` and `a*10^k<b*10^35`. The hard point is that the callers (the public types' addition and subtraction methods, `mul_general`, `div`, `quantize`, `round_to_multiple`, `round_to_unit_multiple_64`, `round_to_multiple_general`, `parse_general` and width conversion) are not verified. | The value-range argument recorded at each caller (the `clippy::arithmetic_side_effects` reason), the Kani harnesses and tests that exercise those callers, and the caller arguments below. |
+| `eq`/`cmp`: finite canonical operands, `P=max(source precisions)`, coefficients below `10^P`; every gap for P=7, and equality for P=34 | Numeric correctness of the P=7 equality/ordering and the P=34 equality path. P=7 agreement with `cmp_general` is proved over every gap, and P=34 equality agreement at gap 0; the Kani-only reference's numeric correctness has no direct proof. P=16 equality/ordering and P=34 ordering are proved over their whole finite domains by Verus. | The comparison argument below, `comparison_alignment_boundaries_all_width_pairs`, and `comparison_extreme_exponents_all_width_pairs`. |
+| `cmp_general`: finite canonical operands of every width; Kani reference only | Its numeric correctness remains unproved on every domain. It is not compiled into the production library or called by production ordering. P=7 and gap-zero P=34 agreement with this reference do not by themselves establish numeric correctness. | The ordered-exponent digit guard argument below and the comparison tests. |
 | `parse_64`: all accepted and rejected input bytes reaching its 8..17-byte significand paths, both signs and every direction | The complete two-word parser for significands of 9 or more bytes, results produced by the fallback parsers, and non-ASCII input. Only the fast-path results for ASCII strings of length 8 are proved, in the stubbed table above. The hard point is the combined lane conversion and wide coefficient accumulation; a proof of `parse_eight` alone is insufficient. | The SWAR and bounded-scan arguments below, `parse_short_significands_match_independent_reference`, `parse_short_significands_match_general_parser`, and `parse_invalid_bytes_at_each_chunk_position`. |
 | `parse_32`, `parse_chunks` and `parse_general`: all accepted and rejected input strings that reach each parser, both signs and every direction | Every result of `parse_chunks` and `parse_general`, which also receive every input that the fast paths of `parse_32` and `parse_64` pass on, and non-ASCII input. Only the `parse_32` fast-path results for ASCII strings of length 0 to 9 are proved, in the stubbed table above. | The parsing arguments below, `parse_grammar_shapes_and_rejected_classes`, `parse_coefficient_exponent_sign_and_range_classes`, `parse_unbounded_digits_saturation_and_scale_clamps`, `parse_long_nonzero_significands_in_range`, the grammar fuzzers and `decimal32_exhaustive_format_parse_round_trip`. |
 | `mul` fast path: all finite canonical operand width pairs, each result width and every direction | The operand swap, the exact product from two `u64` carrying multiplications, and the `high=0` and range checks that choose between returning that product and calling `mul_general`. | The exact-product argument below, `mul_exact_product_capacity_widening_and_exponent_boundaries`, `mul_all_width_pairs_coefficient_exponent_sign_classes`, and independent BigInt products. |
@@ -612,49 +647,79 @@ classification and directed result by the inequalities above.
 `fit_preferred_exponent_clamps_and_extreme_i64_exponents` checks exponent
 extremes, zero preferences, precision headroom, and exact underflow recovery.
 
-### Bounded-gap exact sum
+### Bounded exact sum
 
-Domain: canonical finite operands whose exponent gap has magnitude at most
-four, and whose minimum exponent is inside the result exponent interval.
-Decoded exponents are in `[-6176,6111]`, so their signed difference fits
-`i32`. Each decoded coefficient is below `10^34`. Convert each coefficient
-exactly to `i128` and apply its effective sign (the second sign is flipped
-for subtraction). For a nonzero gap, multiply the coefficient at the larger
-exponent by `10^abs(gap)`. The power index is at most four, the factor is at
-most `10^4`, and the signed sum has magnitude at most
-`(10^34-1)*10001 < 2^127`. A compile-time assertion checks this maximum;
-monotonicity covers every smaller coefficient and each gap in `0..=4`.
+Domain: canonical finite operands admitted by `abs(gap)<=4` for Decimal32
+and Decimal64 results, and by either `abs(gap)<=4` or
+`10*abs(gap)+3*bit_width(c_high)<=378` for Decimal128 results, where `c_high`
+is the coefficient at the larger exponent. Decoded exponents are in `[-6176,6111]`, so their
+signed difference fits `i32` and the guard arithmetic fits `u32`.
+An explicit `abs(gap)<=37` table-index check exposes a bound already implied
+by admission: a larger gap fails both the four-exponent window and the bit
+guard, even for a zero coefficient. It removes no admitted input.
+Each coefficient is below `10^34`. Decimal32 and Decimal64 results check
+admission before coefficient conversion and effective signs. Decimal128
+results convert coefficients exactly to `i128` and apply effective signs
+before checking admission. The second sign is flipped for subtraction.
+`W::LAYOUT.digits` selects this order at compile time. Only the coefficient
+at the larger exponent has a scale greater than one. For result precision
+below 34 and a nonzero gap, both signed coefficients are multiplied by
+64-bit table powers: `10^max(gap,0)` and `10^max(-gap,0)`. One power is one;
+both indices are at most four. These powers convert exactly to `i128`, and
+`lemma_add_fast_scale` bounds both products even for Decimal128 operands.
+Equal exponents add the signed coefficients directly. Precision 34 retains
+the single-coefficient alignment and bit guard.
+
+The unconditional four-exponent window bounds the signed sum magnitude by
+`(10^34-1)*10001 < 2^127`, checked at compile time. Outside that window,
+write `b=bit_width(c_high)` and `k=abs(gap)`. The bit guard implies `k<=37`
+and `b+ceil(10*k/3)<=126`. Since `10^3<2^10`,
+`10^k<=2^ceil(10*k/3)`; this follows by induction in steps of three,
+with bases zero, one and two. For a nonzero coefficient `c_high<2^b`,
+so `c_high*10^k<2^126`; zero has the same strict bound.
+The other magnitude is below `10^34<2^126`, so both signs of their sum fit
+`i128`. The Verus lemmas `lemma_add_pow10_bit_bound`, `lemma_add_bit_scale`
+and `lemma_add_sum_bound` establish the power, scaled-product and sum bounds.
+The direct Verus proof of `kernel::add_sub` covers this entire admitted
+domain, for every result width, effective sign and rounding mode; the expanded
+admission does not rely on a separate gap-sampled Kani proof.
 Thus conversion, negation, multiplication, addition, and unsigned absolute
-value are exact without overflow. Gap five is outside this unconditional
-bound: `(10^34-1)*100001` exceeds even `u128::MAX`.
+value are exact without overflow on the admitted domain.
 
-If the magnitude is below `10^P`, return it at the minimum exponent.
-This is the preferred exponent, and neither precision reduction nor
-underflow is needed. A negative sum is negative; a zero retains the common
-effective sign for two same-sign zeros, and otherwise is negative exactly
-toward negative.
+A fast result is returned only when `InRange::checked` accepts its magnitude
+and the minimum operand exponent. This is the preferred exponent, with no
+precision reduction or underflow. A negative sum is negative; a zero retains
+the common effective sign when the signs agree, and otherwise is negative
+exactly toward negative. The guard is sufficient, not necessary: for example,
+`1e0+100000e-38` is rejected but has the exact result `(10^33+1)e-33`.
+Even an admitted sum may require a cohort shift or rounding and fail the
+checked constructor. All such cases go to the unchanged general kernel.
 
 For two nonzero operands, an accepted sum has magnitude below `10^34`.
-The unscaled coefficient at the minimum exponent is also below `10^34`;
-therefore the scaled coefficient is below `2*10^34 < 10^35`.
-The general algorithm's exact alignment guard must succeed, and its
-magnitude/sign operations give precisely the same signed sum. Its one-zero
-and both-zero branches represent the same integer, sign and preference.
-Since the accepted result already fits at its preference, `fit` gives the
-same fields. If the gap, result exponent range, or coefficient capacity
-guard fails, the general path performs the complete rounding, overflow and
-cohort handling. This partition covers every supported input.
+The unscaled coefficient is also below `10^34`, so the scaled coefficient
+is below `2*10^34<10^35`. The general algorithm's exact alignment guard
+therefore succeeds, and its magnitude/sign operations give the same sum.
+Its one-zero and both-zero branches represent the same integer, sign and
+preference. Since the accepted result fits at its preference, `fit` gives
+the same fields. The fast kernel returns `Option`: only `Some` carries the
+proved rounded-result contract. Public dispatch with a Decimal128 result,
+or without a rounding direction, passes original operands unchanged to one
+cold slow function for `None` or a special operand. Directed Decimal32 and
+Decimal64 results classify specials before finite extraction and share the
+extracted operands between the fast and selected general kernels; only
+special handling and overflow mapping are cold. Both dispatch forms apply
+the selected general computation, encoding and overflow mapping when needed.
+This partition covers every supported input without claiming that the bit guard admits every
+representable sum.
 
 `addsub_equal_exponent_exact_path_boundaries` and
 `addsub_near_exponent_exact_path_boundaries` cross all 27 width combinations
-with both operations, all sign pairs, and all three modes. They check zero,
-maximum coefficients, exact cancellation, achievable aligned sums
-`10^P-1,10^P,10^P+1`, gaps from zero through five in both orders,
-both source exponent endpoints, and the result range endpoints and their
-first neighbors where the source ranges permit them. Impossible sums and
-exponents are excluded by the source bounds. The gap test also checks the
-maximum signed-sum bound and rejection of the first excluded power bound
-using checked integer multiplication.
+with both operations, all sign pairs, and all three modes. The Decimal128
+bit-width and precision boundary tests additionally cross gaps `0..=38`,
+coefficients immediately around the guard thresholds, both operand orders,
+all signs, cancellation, sums `10^34-1`, `10^34` and `10^34+1`, and extreme
+exponents against the independent BigInt oracle. The large-gap cohort
+reduction test retains the counterexample above.
 
 ### Exact addition and subtraction
 
@@ -998,8 +1063,8 @@ of ten, so it never needs more digits than `x`; `Inexact` cannot occur there.
 
 ### Numeric comparison, equality and canonical hashing
 
-Comparison and equality read finite Decimal128 fields only after storage
-validation and special classification.
+Arithmetic, classification, comparison, equality and key hashing read finite
+Decimal128 fields only after storage validation and special classification.
 The large-coefficient BID form has its implicit bit at position 113, hence
 coefficient at least `2^113>10^34-1`. A compile-time assertion checks this
 inequality, so no finite canonical Decimal128 can have that form. Its
@@ -1015,44 +1080,115 @@ accepted by the finite decoder or encode fields with `c<10^34` and
 Decimal32 and Decimal64 comparison handle both finite coefficient forms.
 `OrderedDecimal` hashing extracts finite Decimal128 fields with the same
 canonical-BID extraction as comparison; smaller widths use general unpacking.
-Both extract identical fields on this domain.
+Both extract identical fields on this domain. Arithmetic uses this same
+canonical extraction through the sealed operand implementation. Decimal128
+encoding always uses the small form: its `InRange` coefficient is below
+`10^34 < 2^113`, so the large-form branch is unreachable. The general decoder
+continues to read both forms before rejecting non-canonical input.
 
 Domain: two unpacked finite values of any supported widths. Let `P` be
 the greater operand precision, one of 7, 16, 34, fixed at each call site.
-Both coefficients are below `10^P`. The difference `d=qa-qb` lies in
-`[-12287,12287]`, so subtraction and negation fit `i32`. For
-`|d|<=38-P` (limits 31, 22, 4 respectively), convert the coefficients
-exactly to `i128`, apply each sign, and multiply only the coefficient
-with the larger exponent by `10^|d|`. Each signed magnitude is below
-`10^P*10^(38-P)=10^38<2^127`; a compile-time assertion checks the
-last bound, and the sealed `Width` trait, implemented only by `W32`, `W64`,
-and `W128`, restricts P to the three precisions.
-Negation and multiplication are exact, zero has integer value zero for
-either sign, and the power index is at most 31. Integer comparison is
-therefore numeric comparison at the common exponent `min(qa,qb)`.
-For finite Decimal32 and Decimal64, identical stored bits give Equal before
-unpacking. Identical finite Decimal128 encodings take the zero-gap
-integer path, where both signed coefficients are equal.
+Both coefficients are below `10^P`.
 
-The complementary domain uses general comparison. Zero is handled
-before exponent alignment. Order exponents so `a.exp >= b.exp` and let their
-difference be `d`. It fits `i64`. If `digits(a.c)+d > 35`, the scaled nonzero
-coefficient is at least `10^35`, larger than `b.c < 10^34`. Otherwise `d <= 34`
-and `a.c*10^d < 10^35 < 2^127`, so integer multiplication and comparison are
-exact. Swap reversal and negative-sign reversal preserve numeric order.
-Signed zeros are equal; every finite pair has a total ordering.
+For `P=7`, equal exponents use the coefficients directly: equality requires
+matching coefficients and equal signs or a zero coefficient, and ordering
+compares the exactly signed i64 coefficients. For different exponents, clamp
+`d=qa-qb` to `g` in `[-7,7]`, and align unsigned
+coefficients as `A=a.c*10^max(g,0)` and `B=b.c*10^max(-g,0)`.
+The original difference is in `[-191,191]`. Both products are below
+`10^14<2^63`, so u64 multiplication, conversion to i64 and sign application
+are exact. For `d>=7`, a zero `a.c` stays zero at either gap; a nonzero
+`a.c` scales to at least `10^7>b.c` both before and after clamping.
+For `d<=-7` the argument is symmetric; for smaller gaps alignment is
+unchanged. Applying the signs and comparing i64 values therefore preserves
+every numeric order, including signed zeros. Equality compares `A==B` and
+requires equal signs or `A==0`. This is equivalent to the signed comparison
+returning Equal. No same-width Decimal32 pair reaches a general comparison routine.
+Canonical storage validation establishes `a.c,b.c<10^7`; comparison accepts
+both finite coefficient forms.
+
+For `P=16`, equal exponents use direct coefficient equality with the same
+sign/zero predicate, or exactly signed i128 coefficients for ordering. For
+different exponents, clamp `d=qa-qb` to `g` in `[-16,16]` and use the same
+alignment formulas `A` and `B`. The original difference is in `[-767,767]`.
+Each coefficient and each power fit u64; widening both factors to u128 before
+multiplication gives exact products below `10^32<2^107`. Conversion to i128
+and sign application are exact. For `d>=16`, zero stays zero and a nonzero
+`a.c` scales to at least `10^16>b.c`, before and after clamping; the negative
+gap is symmetric. Equality and ordering therefore preserve every cohort,
+sign and zero case. Decimal64 pairs and Decimal32/Decimal64 pairs compared
+at W64 never reach the bounded window or general routines.
+Verus directly verifies the actual `clamped_magnitudes_64`, `eq_64` and
+`cmp_64` production functions over this entire domain. The mathematical
+specification uses `m=min(qa,qb)` and the exact signed integers
+`sign(a)*a.c*10^(qa-m)` and `sign(b)*b.c*10^(qb-m)`, without a bounded-integer
+reference or a general-comparison assumption. `lemma_comparison_scale_64`
+proves the power, widening-product and zero bounds;
+`lemma_comparison_dominance_64` and `lemma_comparison_clamp_64` prove both
+clamped dominance directions and the unchanged interior gaps;
+`lemma_comparison_signs` transfers magnitude order and equality to signed
+values, including both zero signs. The equal-exponent branches use exact
+i128 coefficients directly. The generic W64 entry points dispatch directly
+to these verified functions.
+The two retained dominance harnesses independently check those entry points
+on both clamped tails, including signs and zeros. The three aligned-numeric
+Kani partitions are subsumed by the whole-domain Verus proof and are no
+longer registered.
+The unrestricted W32 harnesses prove agreement with `cmp_general`, whose
+numeric correctness is not independently machine-proved.
+
+For `P=34`, `cmp_128` aligns signed i128 coefficients inline when
+`|qa-qb|<=4`. It applies both signs before multiplying only the coefficient
+at the larger exponent by `10^|qa-qb|`, then compares the signed integers.
+All signs and zeros use this same path. Each product has magnitude below
+`10^38<2^127`; conversion, negation and multiplication are exact.
+
+Larger gaps call the non-inlined `cmp_wide_gap_128`; `cmp_general` remains
+a Kani-only reference. The helper's contract covers the whole finite W128
+domain, including signed zeros and every exponent gap. Effective negative
+signs exclude zero. Different effective signs decide order immediately.
+With equal effective signs, a zero coefficient compares by magnitude;
+otherwise let `da=digits(a.c)` and `db=digits(b.c)`, each in `1..=34`.
+At the common exponent `m=min(qa,qb)`,
+`10^(qa-m+da-1) <= a.c*10^(qa-m) < 10^(qa-m+da)`, and likewise for `b`.
+Different adjusted exponents `qa+da` and `qb+db` therefore decide magnitude
+order. If they agree, `qa-qb=db-da` is in `[-33,33]`, and the single aligned
+product is below `10^max(da,db)<=10^34`. Reverse magnitude order for a shared
+effective negative sign. All exponent arithmetic fits i32.
+
+Verus proves that both functions return the order of the exact signed
+integers at `m`. `lemma_add_fast_scale` bounds the signed small-gap product,
+and `lemma_add_signed_product` identifies the aligned signed integers.
+`lemma_comparison_adjusted` proves the different-adjusted-exponent rule;
+`lemma_comparison_align_128` proves the equal-adjusted-exponent gap and product
+bounds. Verus checks the helper's full precondition at its call from
+`cmp_128`. This includes every mixed-width pair compared at W128 and both
+zero signs. The generic W128 entry point calls `cmp_128` directly.
+
+Decimal32/Decimal64 identical bits give Equal unless they encode NaN,
+which remains unordered, before finite unpacking. Identical finite Decimal128 encodings
+use the equal-exponent signed-coefficient path.
+
+`cmp_general` and `cmp_mag` remain compiled only for Kani reference checks.
+Their source argument is unchanged: zeros and effective signs decide first;
+order exponents so `qa>=qb`, and put `d=qa-qb`. If `digits(a.c)+d>35`, the
+scaled nonzero magnitude exceeds `b.c<10^34`; otherwise `d<=34` and the exact
+product is below `10^35<2^127`. Swap reversal and negative-sign reversal
+preserve numeric order. This reference has no direct whole-domain numeric
+machine proof and is not used by production ordering.
 
 For Decimal32 and Decimal64, identical stored bits compare equal except for
 NaNs, which compare unequal and unordered. Special operands are classified
-before the finite equality routine, which covers all nine width pairs. It
-first uses the same bound `|d|<=38-P`, multiplying unsigned coefficients to a common
-exponent. The signed-alignment proof also establishes these unsigned products
-below `10^38`. Equality then requires equal aligned coefficients and either
+before the finite equality routine, which covers all nine width pairs.
+Pairs with `P=7/16` use the direct or clamped equality above; for `P=34` it
+first uses the bound `|d|<=4`, multiplying unsigned coefficients to a common
+exponent. The coefficient bound `c<10^34` and power bound `10^4` keep these unsigned
+products below `10^38`. Equality then requires equal aligned coefficients and either
 equal signs or a zero aligned coefficient. Both sign tests are boolean
 operations without sign-dependent control flow. Positive powers preserve
 the zero/nonzero classification. This predicate is necessary and sufficient
 for numeric equality throughout the bounded domain.
-The complementary domain uses general equality. There `|d|>38-P>=4`, so
+Only `P=34` uses general equality. There `|d|>4`, so
 the exponents differ, and a zero equals only another zero, independently of
 sign and exponent. Nonzero opposite signs cannot be equal.
 For same-sign nonzero operands let `d=qa-qb`, in `[-12287,12287]`, so
@@ -1405,16 +1541,14 @@ establish the result for all members of each following disjoint path class.
 
 | Partition of finite inputs | Why members share the path and result rule | Tests exercising the partition |
 |---|---|---|
-| Comparison extraction: Decimal128 finite canonical small form; Decimal32/Decimal64 both finite coefficient forms | Decimal128's excluded form has coefficient >=2^113, above its maximum; after special classification, fixed field extraction equals general decoding on every finite canonical value | `comparison_decimal128_canonical_storage_boundary` checks 64/112-bit limb boundaries, the maximum and first invalid coefficient, and both excluded finite combination extremes against independent decoding; `comparison_alignment_boundaries_all_width_pairs`, `comparison_extreme_exponents_all_width_pairs` and `cohort_hashes_cross_width_and_zero_signs` check public comparison against independent decoding and hashing; `decimal128_construction_paths_store_small_form` checks constants, parsing including `FromStr`, decoding, quantize, widening including Decimal32/Decimal64 values rounded to a multiple, addition and subtraction with and without a rounding direction for all nine operand width pairs, and multiplication with and without a rounding direction for all nine operand width pairs into Decimal128, and rounding to a multiple; it filters out special results and requires at least one successful finite result for each path and width pair, and asserts the stored coefficient and exponent of a rounded parse and a rounded addition that carry out of 34 digits; `decimal128_from_bits_rejects_large_form` checks the finite large-form extremes (combination field 24 to 29, both signs, low 122 bits all zero or all one) and 100,000 patterns with a combination field drawn from 24 to 29 and random sign and low 122 bits |
-| Comparison: Decimal32/Decimal64 identical bits; gap magnitude <=38-P or >38-P, for greater precision P=7/16/34 | Identical finite bits denote the same value; bounded signed alignment is exact including zeros; the complementary domain uses the complete general ordering rule | `comparison_alignment_boundaries_all_width_pairs` crosses all nine width pairs, both orders and signs, identical operands, gap limits 4/22/31 and both neighbors, maxima and cohort neighbors; `comparison_extreme_exponents_all_width_pairs` crosses each width's range endpoints and adjacent exponents, zeros and maxima |
-| General comparison: zero/nonzero, equal/different effective signs | Zero ignores sign; different signs decide order; equal negative signs reverse the magnitude result | `decimal32_all_class_pairs_bigint_comparison`, `cohort_hashes_cross_width_and_zero_signs` |
-| General comparison: ordered exponent difference, digit sum `<=35`/`>35`, scaled coefficient `<`/`=`/`>` | Either the bounded exact multiply decides order or the digit lower bound decides it; all nonzero coefficients have a unique digit length | `comparison_exponent_gap_digit_guard_and_sign_classes` checks all width pairs, coefficient classes, gap boundaries and both signs in both operand orders |
-| Equality: Decimal32/Decimal64 identical bits; gap magnitude <=38-P or >38-P; both/one/no zero; equal/different signs; gap magnitude 1..33 or >=34; aligned product fits/overflows u128 | Exact alignment is necessary and sufficient; overflow and gaps >=34 cannot match a supported coefficient. These disjoint decisions exhaust all finite pairs and agree with OrderedDecimal Ord and decimal PartialOrd | `comparison_alignment_boundaries_all_width_pairs` covers all nine pairs and both orders, all gaps 0..39, coefficient maxima, exact cohort neighbors and checked-product overflow neighbors; `comparison_extreme_exponents_all_width_pairs` covers maximal cross-width gaps and zero signs; the other comparison and cohort tests in `src/compare_tests.rs` also apply |
+| Finite extraction: Decimal128 finite canonical small form; Decimal32/Decimal64 both finite coefficient forms | Decimal128's excluded form has coefficient >=2^113, above its maximum; after special classification, fixed field extraction equals general decoding on every finite canonical value | `comparison_decimal128_canonical_storage_boundary` checks 64/112-bit limb boundaries, the maximum and first invalid coefficient, and both excluded finite combination extremes against independent decoding; `comparison_alignment_boundaries_all_width_pairs`, `comparison_extreme_exponents_all_width_pairs` and `cohort_hashes_cross_width_and_zero_signs` check public comparison against independent decoding and hashing; `decimal128_construction_paths_store_small_form` checks constants, parsing including `FromStr`, decoding, quantize, widening including Decimal32/Decimal64 values rounded to a multiple, addition and subtraction with and without a rounding direction for all nine operand width pairs, and multiplication with and without a rounding direction for all nine operand width pairs into Decimal128, and rounding to a multiple; it filters out special results and requires at least one successful finite result for each path and width pair, and asserts the stored coefficient and exponent of a rounded parse and a rounded addition that carry out of 34 digits; `decimal128_from_bits_rejects_large_form` checks the finite large-form extremes (combination field 24 to 29, both signs, low 122 bits all zero or all one) and 100,000 patterns with a combination field drawn from 24 to 29 and random sign and low 122 bits |
+| Comparison: special/finite; P=7/16 direct or clamped alignment; P=34 signed alignment at gaps 0..4, or larger gaps with different/equal adjusted exponents | Class handling and identical-bit shortcuts preserve NaN and infinity rules; clamping preserves P=7/16 order; P=34 small-gap alignment stays below `10^38`, and larger-gap digit intervals decide different adjusted exponents while equality bounds the single exact alignment product below `10^34` | `comparison_alignment_boundaries_all_width_pairs`, `comparison_extreme_exponents_all_width_pairs`, and `comparison_exponent_gap_digit_guard_and_sign_classes` cross all widths, signs, zeros, exponent gaps and cohort neighbors; P=16 and P=34 ordering also have the whole-domain Verus proofs above |
+| Equality: Decimal32/Decimal64 identical bits; P=7/16 direct coefficient equality at equal exponents or clamped alignment otherwise; for P=34, gap magnitude <=4 or >4; both/one/no zero; equal/different signs; gap magnitude 1..33 or >=34; aligned product fits/overflows u128 | Exact alignment is necessary and sufficient; overflow and gaps >=34 cannot match a supported coefficient. These disjoint decisions exhaust all finite pairs and agree with OrderedDecimal Ord and decimal PartialOrd | `comparison_alignment_boundaries_all_width_pairs` covers all nine pairs and both orders, all gaps 0..39, coefficient maxima, exact cohort neighbors and checked-product overflow neighbors; `comparison_extreme_exponents_all_width_pairs` covers maximal cross-width gaps and zero signs; the other comparison and cohort tests in `src/compare_tests.rs` also apply |
 | No digit reduction/digit reduction; precision shift smaller/equal/larger than underflow shift | The maximum defining `k` chooses exactly one division grid; quotient/remainder theorem applies for any coefficient within that class | `narrowing_all_coefficient_exponent_classes_bigint`, `fit_full_integer_domain_boundaries_and_sticky_rational_oracle` |
 | Exact/inexact discard; zero/nonzero quotient; preferred shift limited by precision/preference | Euclidean remainder zero is exact; nonzero remainder or sticky is inexact; multiplication headroom decides the unique closest exponent | `narrowing_all_coefficient_exponent_classes_bigint`, `fit_preferred_exponent_clamps_and_extreme_i64_exponents` |
 | Inexact, sign x direction; increment/no increment; carry/no carry | Every strictly positive discarded fraction gives the same directed integer endpoint; only quotient `10^P-1` can carry | `narrowing_largest_finite_and_underflow_boundaries`, `fit_full_integer_domain_boundaries_and_sticky_rational_oracle` |
 | Final exponent below/at/above `qmax`; exact magnitude below/at/above maximum | Range comparison and the quotient/remainder inequalities decide success, `Overflow`, or `Inexact`; direction is applied before the rounded range test | `narrowing_largest_finite_and_underflow_boundaries`, `narrowing_all_coefficient_exponent_classes_bigint` |
-| Addition/subtraction dispatch: gap magnitude `0..=4`, preferred exponent in result range and magnitude below `10^P`, or complementary general path | The signed scaled-integer bound covers every coefficient and sign; the accepted aligned result is exactly representable at its preference. Gap/range/capacity failure uses the full general algorithm | `addsub_equal_exponent_exact_path_boundaries`, `addsub_near_exponent_exact_path_boundaries`, `addsub_all_27_coefficient_gap_sign_classes` |
+| Addition/subtraction dispatch: gap magnitude `0..=4` or the bit-width guard, preferred exponent in result range and magnitude below `10^P`, or complementary general path | The signed scaled-integer bound covers every coefficient and sign; the accepted aligned result is exactly representable at its preference. Gap/range/capacity failure uses the full general algorithm | `addsub_equal_exponent_exact_path_boundaries`, `addsub_near_exponent_exact_path_boundaries`, `addsub_decimal128_bit_width_alignment_boundaries`, `addsub_decimal128_precision_and_exponent_boundaries`, `addsub_decimal128_exact_sum_after_large_gap_cohort_reduction`, `addsub_all_27_coefficient_gap_sign_classes` |
 | Addition/subtraction: both zero/one zero/nonzero; shared/differing effective signs; cancellation | Effective signs and exact integer arithmetic decide the sign independently of width; zero uses the original preferred exponent clamped by `fit` | `addsub_zero_cohorts_and_self_operations`, `addsub_all_27_coefficient_gap_sign_classes` |
 | Addition/subtraction: `digits(A)+d <=37` or `>37`; retry succeeds/fails; stripped count smaller/equal/larger than gap | Exact bound covers every aligned integer; bounded stripping preserves value and preference; failed retry implies a nonzero remainder and dominance | `addsub_exact_compression_boundary_and_trailing_zeros`, `addsub_all_27_coefficient_gap_sign_classes` |
 | Addition/subtraction compression: same/opposite effective signs; `g<39`/`g>=39`; all destination precisions | The positive fractional tail and lower coefficient bound establish the same directed grid endpoint for every tail in `(0,1)` | `addsub_all_27_coefficient_gap_sign_classes`, `addsub_exact_compression_boundary_and_trailing_zeros` |

@@ -114,7 +114,7 @@ fn any_in_range<W: Width>() -> Unpacked {
 
 macro_rules! layout_proofs {
     ($bits:ty, $width:ty, $format:expr, $decimal:ty, $decode:ident, $encode:ident,
-     $decode_proof:ident, $encode_proof:ident, $checked_proof:ident, $public_proof:ident) => {
+     $decode_proof:ident, $encode_proof:ident, $checked_proof:ident, $public_proof:ident, $zero_proof:ident) => {
         #[kani::proof]
         fn $decode_proof() {
             let bits: $bits = kani::any();
@@ -164,6 +164,17 @@ macro_rules! layout_proofs {
         }
 
         #[kani::proof]
+        fn $zero_proof() {
+            let bits: $bits = kani::any();
+            if let Ok(value) = <$decimal>::from_bits(bits) {
+                assert_eq!(
+                    value.is_zero(),
+                    matches!(value.class(), Class::Finite(v) if v.coeff == 0)
+                );
+            }
+        }
+
+        #[kani::proof]
         fn $public_proof() {
             let bits: $bits = kani::any();
             match (<$decimal>::from_bits(bits), $decode(bits)) {
@@ -201,7 +212,8 @@ layout_proofs!(
     decode_32_matches_interchange_format,
     encode_32_round_trips_every_in_range_field,
     in_range_32_accepts_exactly_the_layout_bounds,
-    public_storage_32_matches_decode
+    public_storage_32_matches_decode,
+    is_zero_32_matches_class
 );
 layout_proofs!(
     u64,
@@ -213,7 +225,8 @@ layout_proofs!(
     decode_64_matches_interchange_format,
     encode_64_round_trips_every_in_range_field,
     in_range_64_accepts_exactly_the_layout_bounds,
-    public_storage_64_matches_decode
+    public_storage_64_matches_decode,
+    is_zero_64_matches_class
 );
 layout_proofs!(
     u128,
@@ -225,7 +238,8 @@ layout_proofs!(
     decode_128_matches_interchange_format,
     encode_128_round_trips_every_in_range_field,
     in_range_128_accepts_exactly_the_layout_bounds,
-    public_storage_128_matches_decode
+    public_storage_128_matches_decode,
+    is_zero_128_matches_class
 );
 
 #[kani::proof]
@@ -233,6 +247,10 @@ fn unpack_canonical_128_matches_decode() {
     let bits: u128 = kani::any();
     if let Ok(v) = decode_128(bits) {
         assert!(same(unpack_canonical_128(bits), v));
+        let Ok(value) = Decimal128::from_bits(bits) else {
+            panic!("canonical finite storage rejected");
+        };
+        assert!(same(Sealed::unpack(value), v));
     }
 }
 

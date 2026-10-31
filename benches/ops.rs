@@ -1,8 +1,8 @@
 use bidecimal::{Decimal32, Decimal64, Decimal128, Error, Rounding};
 use core::fmt::{self, Write};
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
 use num_bigint::BigInt;
-use std::{cmp::Ordering, time::Duration};
+use std::{cmp::Ordering, hint::black_box, time::Duration};
 
 #[expect(
     dead_code,
@@ -223,6 +223,88 @@ fn addition<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     });
 }
 
+fn product_spec(rng: &mut SplitMix64) -> Spec {
+    let places = rng.below(13) as u32;
+    let min_left_places = places.saturating_sub(8);
+    let left_places =
+        min_left_places + rng.below(u64::from(places.min(4) - min_left_places + 1)) as u32;
+    let right_places = places - left_places;
+    let mut left = rng.spec(7);
+    left.exp = -(left_places as i32);
+    let mut right = rng.spec(8 + right_places);
+    right.exp = -(right_places as i32);
+    Spec {
+        neg: left.neg != right.neg,
+        coeff: left.coeff * right.coeff,
+        exp: left.exp + right.exp,
+    }
+}
+
+fn addition_128(c: &mut Criterion, rng: &mut SplitMix64) {
+    let same_exp: Vec<(Spec, Spec)> = (0..COUNT)
+        .map(|_| {
+            let a = rng.spec(30);
+            let mut b = rng.spec(30);
+            b.exp = a.exp;
+            (a, b)
+        })
+        .collect();
+    let gap_wide: Vec<(Spec, Spec)> = (0..COUNT)
+        .map(|_| (product_spec(rng), product_spec(rng)))
+        .collect();
+    for (name, specs) in [
+        ("add_d128_exact_same_exp", same_exp),
+        ("add_d128_exact_gap_wide", gap_wide),
+    ] {
+        let inputs: Vec<(Decimal128, Decimal128)> =
+            specs.iter().map(|&(a, b)| (a.parse(), b.parse())).collect();
+        for (&(x, y), &(a, b)) in specs.iter().zip(&inputs) {
+            let (coeff, exp) = aligned_sum(x, y, false);
+            assert!(coeff.magnitude().to_string().len() <= 34);
+            check(
+                Decimal128::add(a, b),
+                floor_fields(coeff, exp, 34, false),
+                &format!("{name}: {x:?}, {y:?}"),
+            );
+        }
+        per_element(c, name, &inputs, |&(a, b)| Decimal128::add(a, b));
+    }
+
+    let specs: Vec<Spec> = (0..COUNT).map(|_| product_spec(rng)).collect();
+    let inputs: Vec<Decimal128> = specs.iter().map(|&x| x.parse()).collect();
+    let mut accumulator = Decimal128::ZERO;
+    let mut coeff = BigInt::ZERO;
+    let mut exp = 0_i32;
+    for (i, (&spec, &value)) in specs.iter().zip(&inputs).enumerate() {
+        let next_exp = exp.min(spec.exp);
+        coeff = coeff * pow10(exp - next_exp) + signed(spec) * pow10(spec.exp - next_exp);
+        exp = next_exp;
+        assert!(coeff.magnitude().to_string().len() <= 34);
+        let result = Decimal128::add(accumulator, value);
+        check(
+            result,
+            floor_fields(coeff.clone(), exp, 34, false),
+            &format!("add_d128_accumulate: prefix={}, {spec:?}", i + 1),
+        );
+        accumulator = result.unwrap();
+    }
+    let mut group = c.benchmark_group("add_d128_accumulate");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(COUNT as u64));
+    group.bench_function("set", |bencher| {
+        bencher.iter(|| {
+            black_box(
+                black_box(&inputs)
+                    .iter()
+                    .try_fold(black_box(Decimal128::ZERO), |acc, &value| {
+                        Decimal128::add(acc, black_box(value))
+                    }),
+            )
+        })
+    });
+    group.finish();
+}
+
 fn multiplication<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     let half = T::DIGITS / 2;
     let specs: Vec<(Spec, Spec)> = (0..COUNT)
@@ -440,6 +522,7 @@ fn ops(c: &mut Criterion) {
     width::<Decimal64>(c, &mut rng);
     width::<Decimal128>(c, &mut rng);
     mixed(c, &mut rng);
+    addition_128(c, &mut rng);
 }
 
 criterion_group! { name = benches; config = Criterion::default()

@@ -5,10 +5,9 @@ cd "$(dirname "$0")/.."
 
 harnesses=(
     kernel::proofs::bounded_128_gap_p00_matches_general
-    kernel::proofs::bounded_64_gap_m22_matches_general
-    kernel::proofs::bounded_64_gap_p00_matches_general
-    kernel::proofs::bounded_64_gap_p22_matches_general
-    kernel::proofs::cmp_bounded_32_matches_general
+    kernel::proofs::cmp_32_matches_general
+    kernel::proofs::comparison_64_negative_dominance
+    kernel::proofs::comparison_64_positive_dominance
     kernel::proofs::digits_64_is_the_decimal_length
     kernel::proofs::digits_is_the_decimal_length
     kernel::proofs::div_rem_pow10_64_k15
@@ -21,7 +20,7 @@ harnesses=(
     kernel::proofs::div_rem_pow10_k37
     kernel::proofs::div_rem_pow10_k38
     kernel::proofs::div_rem_pow10_outside_table
-    kernel::proofs::eq_bounded_32_matches_general
+    kernel::proofs::eq_32_matches_general
     kernel::proofs::power_tables_are_powers_of_ten
     kernel::proofs::strip_trailing_zeros_64_z15
     kernel::proofs::strip_trailing_zeros_64_zero
@@ -36,6 +35,9 @@ harnesses=(
     layout_proofs::in_range_128_accepts_exactly_the_layout_bounds
     layout_proofs::in_range_32_accepts_exactly_the_layout_bounds
     layout_proofs::in_range_64_accepts_exactly_the_layout_bounds
+    layout_proofs::is_zero_128_matches_class
+    layout_proofs::is_zero_32_matches_class
+    layout_proofs::is_zero_64_matches_class
     layout_proofs::public_storage_128_matches_decode
     layout_proofs::public_storage_32_matches_decode
     layout_proofs::public_storage_64_matches_decode

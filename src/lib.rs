@@ -74,6 +74,7 @@ mod display;
 mod error;
 mod kernel;
 mod layout;
+mod narrow;
 mod operand;
 mod ordered;
 mod parse;
