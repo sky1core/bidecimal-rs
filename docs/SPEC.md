@@ -228,6 +228,39 @@ result = step × to_integer(x / step), returned in the type of x and step
   digits or a smaller exponent than the target provides is a
   not-exactly-representable error.
 
+### Coefficient, exponent, mantissa, and scale
+
+- Individual accessors use semantic names: `coefficient()` returns the stored
+  signed coefficient; `mantissa()` is its alias, not a normalized fraction.
+  `exponent()` returns the stored decimal exponent, and `scale()` its negation.
+  All four return `Result`, rejecting infinity and NaN with `InvalidInput`.
+  Trailing zeros and the exponent of zero are preserved. A negative-zero
+  coefficient is integer zero; its sign is available through `is_sign_negative`.
+
+- Pair APIs are `from_coefficient_and_exponent` / `to_coefficient_and_exponent`
+  and `from_mantissa_and_scale` / `to_mantissa_and_scale`. Each constructor has
+  a `_rounded` counterpart taking a rounding direction. Coefficient/mantissa
+  is signed; value = coefficient × 10^exponent = mantissa × 10^(−scale).
+  Exponent construction accepts the full `i32` input domain directly, including
+  `i32::MIN`; it does not negate the exponent in `i32` arithmetic.
+  Decimal32 uses i32 coefficients, Decimal64 uses i64, and Decimal128 uses
+  i128; exponent and scale use i32.
+- `from_coefficient_and_exponent` and its `_rounded` counterpart give the
+  same bits or error as parsing `{coefficient}E{exponent}`, without or with
+  the corresponding direction. The preferred exponent is exponent.
+- `from_mantissa_and_scale` and `from_mantissa_and_scale_rounded` give the same bits or error as
+  parsing the integer followed by `E` and the negated scale, without or with
+  a direction respectively. The preferred exponent is −scale; precision and
+  exponent limits follow narrowing, with at most one directed rounding.
+  Integer and scale extrema follow the same rules without overflow in
+  interpreting the inputs.
+- `to_mantissa_and_scale` returns the stored signed coefficient and negated exponent
+  of a finite value without removing trailing zeros: `1.00` gives `(100, 2)`.
+  It never fails for a finite value; infinity and NaN are invalid input.
+  Reconstructing from the pair preserves every finite bit except the sign
+  of negative zero: its pair is `(0, scale)`, and reconstruction gives positive
+  zero. The original sign remains available through `is_sign_negative`.
+
 ### Parsing
 
 - Converts a string to each type.
@@ -261,6 +294,29 @@ result = step × to_integer(x / step), returned in the type of x and step
 - Width, fill, alignment, and sign flags of the formatter apply, to an
   infinity or NaN as for `f64`. Formatting never rounds, so a precision flag
   is ignored.
+
+### Serialization
+
+- The optional `serde` feature provides `Serialize` and `Deserialize` for
+  `Decimal32`, `Decimal64`, `Decimal128`, and `OrderedDecimal<T>`, retaining
+  `no_std` without requiring allocation or serde's `std` or `alloc` features.
+- Serializers write the existing `Display` output as a string.
+  Deserialization accepts strings through exact parsing and signed or unsigned
+  integers through 128 bits with the same exactness and range rules as parsing.
+  Because it accepts both, it asks the format for any value, so a
+  format used for deserialization must support deserialize_any.
+  Floating-point inputs are rejected with an instruction to send strings.
+  Integer input width also depends on the backend: default serde_json uses
+  native i64/u64 integer tokens and may report larger JSON numbers as floats.
+  Send decimal strings for exact values outside those integer ranges.
+  Parsing failures, including those of integer inputs, report serde errors
+  that include the corresponding decimal error.
+- String round trips preserve the numeric value, finite fractional cohorts,
+  and zero signs. Positive exponents are not retained (`1E+5` is written as
+  `"100000"`), and NaN sign, payload, and signaling state are lost, as in
+  `Display` and parsing.
+- `OrderedDecimal<T>` delegates to its wrapped value without adding a wrapper
+  to the representation or normalizing equal keys.
 
 ## Verification
 

@@ -19,7 +19,9 @@ pub enum Error {
     /// of a non-canonical encoding, a negative step, including −∞, for
     /// rounding to a multiple, or a quantize exponent outside the type's
     /// exponent range or at which the coefficient of the result needs more
-    /// digits than the type has.
+    /// digits than the type has, or infinity or NaN passed to `to_mantissa_and_scale`,
+    /// `to_coefficient_and_exponent`,
+    /// `coefficient`, `mantissa`, `exponent`, or `scale`.
     InvalidInput,
 }
 

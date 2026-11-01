@@ -66,7 +66,7 @@ fn sum_is_negative(x: Unpacked, y: Unpacked, subtract: bool) -> bool {
 }
 
 macro_rules! decimal_type {
-    ($name:ident, $bits:ty, $bytes:literal, $width:ty, $decode:ident, $unpack:ident, $compare_unpack:ident, $encode:ident, parse: $parse:ident, identical_bits_shortcut: $identical_bits_shortcut:literal) => {
+    ($name:ident, $bits:ty, $int:ty, $bytes:literal, $width:ty, $decode:ident, $unpack:ident, $compare_unpack:ident, $encode:ident, parse: $parse:ident, identical_bits_shortcut: $identical_bits_shortcut:literal) => {
         #[doc = concat!("A decimal value in the ", $bytes, "-byte IEEE 754-2019 BID interchange encoding: a finite number, an infinity, or NaN.")]
         ///
         /// Precision and exponent range are given by [`DIGITS`](Self::DIGITS),
@@ -723,6 +723,190 @@ macro_rules! decimal_type {
                 }
             }
 
+            /// Constructs the exact value `mantissa × 10^(-scale)`.
+            ///
+            /// Scale is the negation of the exponent passed to
+            /// [`quantize`](Self::quantize): `(1, -5)` represents `1E+5`.
+            /// The preferred exponent is `-scale`. The result has the same
+            /// bits as parsing the integer followed by `E` and the negated
+            /// scale, without allocating or formatting a string.
+            ///
+            /// # Errors
+            ///
+            /// [`Error::Overflow`] if the magnitude exceeds [`MAX`](Self::MAX),
+            /// otherwise [`Error::Inexact`] if the value is not representable.
+            #[expect(clippy::arithmetic_side_effects, reason = "negating an i32 widened to i64 cannot overflow")]
+            pub fn from_mantissa_and_scale(mantissa: $int, scale: i32) -> Result<Self, Error> {
+                Self::from_coefficient_exponent_impl(mantissa, -i64::from(scale), None)
+            }
+
+            /// Constructs `mantissa × 10^(-scale)`, rounding once in direction
+            /// `dir` if the value is not representable.
+            ///
+            /// Scale is the negation of the exponent passed to
+            /// [`quantize`](Self::quantize). The preferred exponent is
+            /// `-scale`; the result has the same bits as
+            /// [`parse_rounded`](Self::parse_rounded) of the integer followed
+            /// by `E` and the negated scale, including directed overflow.
+            /// No string is allocated or formatted.
+            #[expect(clippy::arithmetic_side_effects, reason = "negating an i32 widened to i64 cannot overflow")]
+            pub fn from_mantissa_and_scale_rounded(
+                mantissa: $int,
+                scale: i32,
+                dir: Rounding,
+            ) -> Result<Self, Error> {
+                Self::from_coefficient_exponent_impl(mantissa, -i64::from(scale), Some(dir))
+            }
+
+            /// Constructs the exact value `coefficient × 10^exponent`.
+            /// The coefficient is signed. This is the exponent-sign counterpart
+            /// of [`from_mantissa_and_scale`](Self::from_mantissa_and_scale).
+            /// All `i32` exponents are accepted as inputs without negation overflow.
+            /// Returns the same bits or error as parsing `{coefficient}E{exponent}`
+            /// with [`parse`](Self::parse); the preferred exponent is `exponent`.
+            ///
+            /// # Errors
+            ///
+            /// [`Error::Overflow`] if the magnitude exceeds [`MAX`](Self::MAX),
+            /// otherwise [`Error::Inexact`] if the value is not representable.
+            pub fn from_coefficient_and_exponent(coefficient: $int, exponent: i32) -> Result<Self, Error> {
+                Self::from_coefficient_exponent_impl(coefficient, i64::from(exponent), None)
+            }
+
+            /// Constructs `coefficient × 10^exponent`, rounding once in direction
+            /// `dir` if necessary, including directed overflow.
+            /// Equivalent to parsing the signed coefficient followed by `E`
+            /// and the exponent with [`parse_rounded`](Self::parse_rounded).
+            pub fn from_coefficient_and_exponent_rounded(
+                coefficient: $int,
+                exponent: i32,
+                dir: Rounding,
+            ) -> Result<Self, Error> {
+                Self::from_coefficient_exponent_impl(coefficient, i64::from(exponent), Some(dir))
+            }
+
+            #[expect(
+                clippy::arithmetic_side_effects,
+                reason = "preferred is a widened i32 exponent or negated i32 scale, so the exponent step of one fits i64"
+            )]
+            fn from_coefficient_exponent_impl(
+                coefficient: $int,
+                preferred: i64,
+                dir: Option<Rounding>,
+            ) -> Result<Self, Error> {
+                let magnitude = coefficient.unsigned_abs() as u128;
+                if let Some(value) = InRange::<$width>::checked(coefficient < 0, magnitude, i128::from(preferred)) {
+                    return Ok(Self(layout::$encode(value)));
+                }
+                let mut wide = Wide {
+                    neg: coefficient < 0,
+                    coeff: magnitude,
+                    exp: preferred,
+                    sticky: false,
+                };
+                if wide.coeff > i128::MAX as u128 {
+                    wide.sticky = wide.coeff % 10 != 0;
+                    wide.coeff /= 10;
+                    wide.exp += 1;
+                }
+                Self::finish(kernel::fit(wide, preferred, dir), coefficient < 0, dir)
+            }
+
+            /// Returns the stored signed coefficient without removing trailing zeros.
+            /// For `-123.450`, this is `-123450`. Negative zero returns zero;
+            /// use [`is_sign_negative`](Self::is_sign_negative) for its sign.
+            ///
+            /// # Errors
+            ///
+            /// [`Error::InvalidInput`] for infinity or NaN.
+            pub fn coefficient(self) -> Result<$int, Error> {
+                self.to_coefficient_and_exponent().map(|(coefficient, _)| coefficient)
+            }
+
+            /// Alias for [`coefficient`](Self::coefficient), returning the
+            /// same stored signed integer, not a normalized fraction.
+            ///
+            /// # Errors
+            ///
+            /// [`Error::InvalidInput`] for infinity or NaN.
+            pub fn mantissa(self) -> Result<$int, Error> {
+                self.coefficient()
+            }
+
+            /// Returns the stored decimal exponent: value = coefficient × 10^exponent.
+            /// For `123.450`, this is `-3`; for `1E+5`, it is `5`.
+            /// Zero retains its stored exponent.
+            ///
+            /// # Errors
+            ///
+            /// [`Error::InvalidInput`] for infinity or NaN.
+            pub fn exponent(self) -> Result<i32, Error> {
+                if self.is_special() {
+                    return Err(Error::InvalidInput);
+                }
+                Ok(self.unpack().exp)
+            }
+
+            /// Returns the scale, the negation of [`exponent`](Self::exponent).
+            /// For `123.450`, this is `3`; for `1E+5`, it is `-5`.
+            /// Zero retains its stored scale.
+            ///
+            /// # Errors
+            ///
+            /// [`Error::InvalidInput`] for infinity or NaN.
+            pub fn scale(self) -> Result<i32, Error> {
+                self.to_mantissa_and_scale().map(|(_, scale)| scale)
+            }
+
+            /// Returns the stored signed coefficient and scale, without
+            /// removing trailing zeros: `1.00` gives `(100, 2)` and `1E+5`
+            /// gives `(1, -5)`. The value is `mantissa × 10^(-scale)`; scale is
+            /// the negation of the exponent passed to [`quantize`](Self::quantize).
+            ///
+            /// Negative zero gives `(0, scale)`. Check its original sign with
+            /// [`is_sign_negative`](Self::is_sign_negative); reconstructing
+            /// with [`from_mantissa_and_scale`](Self::from_mantissa_and_scale) gives positive
+            /// zero. Every other finite value round-trips with identical bits.
+            ///
+            /// # Errors
+            ///
+            /// [`Error::InvalidInput`] for infinity or NaN. Finite values
+            /// always fit the returned integer and scale.
+            #[expect(
+                clippy::arithmetic_side_effects,
+                reason = "the assertions bound the coefficient by the integer's MAX and the exponent above i32::MIN, so both negations fit"
+            )]
+            pub fn to_mantissa_and_scale(self) -> Result<($int, i32), Error> {
+                self.to_coefficient_and_exponent().map(|(mantissa, exponent)| (mantissa, -exponent))
+            }
+
+            /// Returns the stored signed coefficient and decimal exponent.
+            /// For `-123.450`, this is `(-123450, -3)`. Trailing zeros and
+            /// the exponent of zero are preserved. Negative zero returns a
+            /// zero coefficient; use [`is_sign_negative`](Self::is_sign_negative)
+            /// to distinguish its sign.
+            ///
+            /// # Errors
+            ///
+            /// [`Error::InvalidInput`] for infinity or NaN.
+            #[expect(
+                clippy::arithmetic_side_effects,
+                reason = "the static coefficient bound fits the signed integer, so negating its magnitude is safe"
+            )]
+            pub fn to_coefficient_and_exponent(self) -> Result<($int, i32), Error> {
+                const {
+                    assert!(10_u128.pow(Self::DIGITS) - 1 <= <$int>::MAX as u128);
+                    assert!(Self::MIN_EXP > i32::MIN && Self::MAX_EXP > i32::MIN);
+                }
+                if self.is_special() {
+                    return Err(Error::InvalidInput);
+                }
+                let value = self.unpack();
+                let magnitude = value.coeff as $int;
+                let int = if value.neg { -magnitude } else { magnitude };
+                Ok((int, value.exp))
+            }
+
             /// Parses a decimal string exactly.
             ///
             /// The accepted syntax is an optional sign (`+` or `-`); a
@@ -1106,6 +1290,7 @@ macro_rules! decimal_type {
 decimal_type!(
     Decimal32,
     u32,
+    i32,
     4,
     W32,
     decode_32,
@@ -1118,6 +1303,7 @@ decimal_type!(
 decimal_type!(
     Decimal64,
     u64,
+    i64,
     8,
     W64,
     decode_64,
@@ -1130,6 +1316,7 @@ decimal_type!(
 decimal_type!(
     Decimal128,
     u128,
+    i128,
     16,
     W128,
     decode_128,

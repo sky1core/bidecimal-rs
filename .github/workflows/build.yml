@@ -27,10 +27,14 @@ jobs:
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Clippy with serde
+        run: cargo clippy --all-targets --locked --features serde -- -D warnings
       - name: Test
         run: cargo test --locked
+      - name: Test serde
+        run: cargo test --locked --features serde --lib serde_tests
       - name: Docs
-        run: cargo doc --no-deps --locked
+        run: cargo doc --no-deps --locked --features serde
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -45,6 +49,8 @@ jobs:
         run: rustup toolchain install 1.98 --profile minimal
       - name: Test
         run: cargo +1.98 test --locked
+      - name: Test serde
+        run: cargo +1.98 test --locked --features serde --lib serde_tests
 
   no-std:
     if: github.event.repository.private == false
@@ -59,3 +65,5 @@ jobs:
           rustup target add x86_64-unknown-none
       - name: Build for a bare-metal target
         run: cargo build --release --lib --locked --target x86_64-unknown-none
+      - name: Build for a bare-metal target with serde
+        run: cargo build --release --lib --locked --target x86_64-unknown-none --features serde

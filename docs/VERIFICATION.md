@@ -6,9 +6,10 @@ This record covers canonical BID storage, finite decoding/encoding, numeric
 comparison, OrderedDecimal key hashing, width conversion, addition, and
 subtraction for precisions 7, 16, and 34, multiplication and division of any
 two widths into any result width, quantize for all three widths, rounding to
-a multiple for all three widths, sign operations, parsing, and
-allocation-free plain formatting with
-optional fractional zero stripping. It does not cover performance.
+a multiple for all three widths, sign operations, integer/scale conversion,
+parsing, and allocation-free plain formatting with
+optional fractional zero stripping, and optional serde serialization.
+It does not cover performance.
 Test-only reference decoding reconstructs the interchange sign, combination
 field, exponent continuation, and coefficient independently of the library's
 layout routines. The finite numeric oracle uses arbitrary-precision signed
@@ -57,6 +58,47 @@ agreement with every result satisfying that contract. No new trusted
 standard-library specification is used. Public dispatch, finite extraction
 and encoding, and overflow mapping remain outside this Verus proof.
 
+## Serialization
+
+Run the full test suite with Serde enabled:
+
+```sh
+cargo test --locked --features serde
+```
+
+To run only the Serde tests:
+
+```sh
+cargo test --locked --features serde --lib serde_tests
+```
+
+`src/serde_tests.rs` checks the public serde implementations for all three
+widths and their `OrderedDecimal` wrappers. Readable token tests compare
+serialization with `Display` and deserialization with the bits returned by
+`parse`, including cohorts, signed zeros, positive exponents, infinities,
+and signed quiet/signaling NaNs with boundary payloads. A bitwise equality
+adapter keeps numeric equality from hiding cohort, zero-sign, or NaN-field
+changes. The 128-bit integer cases use serde's integer value deserializers.
+
+Integer inputs are fitted directly from their sign and unsigned magnitude,
+with preferred exponent zero and no rounding direction. A coefficient already
+in range at exponent zero uses InRange::checked directly; larger coefficients
+use fit. There is no integer
+formatting or reparsing. Magnitudes at or above 2^127 are divided by ten once,
+with a sticky remainder and exponent one. This places the coefficient below
+2^127 while any sticky coefficient is at least 10^33, satisfying the shared
+fit kernel's preconditions for every width. The resulting canonical encoding
+passes the public canonical-value validation boundary. This caller connection
+is reviewed and tested, not a new complete formal proof of the serde wrapper.
+Tests compare values, representation bits, and error kinds with exact parsing
+at precision boundaries, signed/unsigned 64- and 128-bit endpoints, and 10,000
+fixed-seed signed plus unsigned 128-bit patterns per width.
+
+Error tests check malformed, inexact, and overflowing strings, inexact
+integers, and both floating-point input widths.
+These are serde boundary tests, not an enumeration of every decimal value
+or a substitute for the parsing and BID correctness evidence below.
+
 ## Infinity and NaN
 
 `src/operand.rs` seals `is_special`, `class` and finite `unpack` to the three
@@ -85,8 +127,8 @@ encoding is always quiet. Bit decoding and sign operations preserve signaling
 NaNs; sign operations change only the sign bit.
 
 Finite kernel overflow is mapped by `overflow`, through `finish` for
-multiplication, division, narrowing and parsing, and directly for
-addition/subtraction. Without a direction it is `Err(Overflow)`;
+multiplication, division, narrowing, integer/scale construction and parsing,
+and directly for addition/subtraction. Without a direction it is `Err(Overflow)`;
 toward positive it gives +infinity or `MIN`, and toward negative `MAX` or
 -infinity, according to the result sign. Rounding to a multiple reports
 overflow as an error. `parse_special` accepts optionally signed,
@@ -1210,6 +1252,56 @@ fields do not overlap, so distinct normalized keys pack differently and
 numeric equality implies identical hash input, including across widths. The
 NaN and infinity exponent fields `0x3fff` and `0x3ffe` are above `12320`.
 
+### Integer and scale conversion
+
+Domain: every pair of a signed integer (`i32`, `i64`, or `i128` for the
+corresponding width) and an `i32` exponent or scale, and every stored decimal value for
+decomposition. Construction takes `unsigned_abs`, which includes each signed
+minimum, and negates the scale after widening to `i64`. Thus the preferred
+exponent lies in `[-2147483648, 2147483648]` across both constructor pairs
+without signed overflow; the exponent form widens directly without negation.
+
+Already in-range magnitudes and preferred exponents are encoded directly,
+exactly as given, by both the exact and directed constructors.
+For the remaining inputs, every magnitude except `abs(i128::MIN)` is below
+`2^127` and reaches `fit` unchanged with no sticky remainder. For that one exception, Euclidean division
+by ten gives a 38-digit coefficient below `2^127` and a nonzero discarded
+digit, with working exponent one above the preference. The coefficient is
+at least `10^37`, above `10^(P-1)` for every width. It therefore satisfies
+the existing sticky and preferred-exponent premises of `fit`; the discarded
+fraction is never rounded before `fit`. The fitting argument gives the same
+cohort, single directed rounding, and error classification as parsing the
+exact integer at the preferred exponent. `finish` applies the existing
+directed overflow mapping. No new integer kernel is used.
+
+Decomposition rejects infinity and NaN before unpacking. Compile-time bounds
+check that `10^P-1` fits the corresponding signed integer and that negating
+either exponent endpoint fits `i32`. Validated storage therefore supplies
+exactly the signed coefficient and negated exponent without loss. Construction
+of those fields needs no precision or exponent adjustment, so re-encoding
+preserves the original bits. Both zero signs decompose to integer zero;
+reconstruction preserves the exponent and produces positive zero.
+
+`int_scale_construction_boundary_classes` and
+`int_scale_construction_fixed_seed_differential` compare all three modes
+with both the public parser's bits/errors and the independent arbitrary-precision
+string reference. The latter saturates extreme written exponents using its
+own range argument, avoiding enormous powers for extreme scales.
+Decomposition tests use the independent BID decoder, including the accepted
+large-coefficient forms in Decimal32/Decimal64; Decimal128's large form is
+noncanonical. `int_scale_decimal32_exhaustive_reference` is an ignored
+all-`2^32`-pattern check of decomposition, round-trip bits, special rejection,
+and noncanonical input rejection. It is excluded from normal test runs;
+its presence alone does not establish exhaustive execution evidence.
+
+The coefficient/exponent and mantissa/scale pairs share one construction and
+decomposition core, and the four accessors read the same stored fields.
+`coefficient_exponent_construction_matches_parser_and_scale` checks exponent
+extremes, coefficient extremes, exponent boundaries, and both rounding
+directions against parsing and the scale counterpart. The decomposition class
+and fixed-seed tests, and the ignored exhaustive test, check all four accessors
+and both pair APIs, including special-value rejection.
+
 ### String parsing
 
 Domain: every UTF-8 string reaching the finite parser. A byte loop accepts
@@ -1432,12 +1524,14 @@ propagated. No library formatting path allocates.
 
 All tests use the optimized test profile with integer overflow checks enabled.
 Each test runs on one thread, so the test harness's `--test-threads` setting
-bounds the cores a run occupies. Fifteen tests are ignored by default and run
-with `cargo test -- --ignored`: the four Decimal32 exhaustive tests (`decimal32_exhaustive_reference`,
-`decimal32_exhaustive_widening_reference`, `quantize_decimal32_exhaustive_reference` and
-`decimal32_exhaustive_format_parse_round_trip`), the nine tests whose names end in
+bounds the cores a run occupies. Sixteen tests are ignored by default and run
+with `cargo test -- --ignored`: the five Decimal32 exhaustive tests (`decimal32_exhaustive_reference`,
+`decimal32_exhaustive_widening_reference`, `quantize_decimal32_exhaustive_reference`,
+`decimal32_exhaustive_format_parse_round_trip` and
+`int_scale_decimal32_exhaustive_reference`), the nine tests whose names end in
 `_million` or contain `_million_per_`, `mul_decimal128_pair_every_coefficient_class_pair`
-and `div_every_coefficient_class_pair`. The other tests run with `cargo test`, including
+and `div_every_coefficient_class_pair`. The other tests run with `cargo test`
+(the serde tests with `cargo test --features serde`), including
 the ten-million-input structured and widening tests and the million-input kernel division
 tests.
 
@@ -1450,6 +1544,8 @@ tests.
 | Comparison | `decimal32_all_class_pairs_bigint_comparison`: every ordered pair of Decimal32 coefficient/exponent classes, both signs; `all_nine_width_pairs_bigint_random`: 2,000 pairs for each of nine width combinations; `all_nine_width_pairs_bigint_million`: 1,000,000 per combination |
 | Equality/hash/sign | `cohort_hashes_cross_width_and_zero_signs`: every class member, every representable cohort expansion, cross-width equal values, zero at extreme exponents and both signs; all finite pair comparisons also check equality and OrderedDecimal hash agreement when equal |
 | Narrowing | `narrowing_all_coefficient_exponent_classes_bigint`: each of three width pairs, all classes and all three modes; `narrowing_three_pairs_bigint_random`: 2,000 values per pair; `narrowing_three_pairs_bigint_million`: 1,000,000 per pair, each in exact mode and both directions |
+| Integer/scale construction | `int_scale_construction_boundary_classes`: every integer digit length through the signed maximum, powers of ten and neighbors, all-nines, trailing-zero coefficients, both signs, MIN/MAX, precision and exponent transitions, scales at both i32 extrema, exact and both directions; `int_scale_construction_fixed_seed_differential`: 2,000 fixed-seed pairs per width, full-range integers and mixed near-range/full-i32 scales, all three modes, against parser bits/errors and independent arbitrary-precision reference |
+| Integer/scale decomposition | `int_scale_decomposition_classes_and_roundtrip`: coefficient/exponent classes, every exponent with zero/unit/maximum and steering-boundary neighbors, both signs, both infinities and signed quiet/signaling NaNs at zero/unit/maximum payload; `int_scale_decomposition_fixed_seed_bits`: 10,000 raw patterns per width against independent decoding; `int_scale_documented_contract`: preferred exponent, trailing zeros and negative-zero sign loss; `int_scale_decimal32_exhaustive_reference`: ignored full-domain decomposition/round-trip check |
 | Addition/subtraction | `addsub_all_27_coefficient_gap_sign_classes`: all 27 source/source/result combinations, both operations and all modes, every coefficient digit class paired across widths, both exponent orders, all sign pairs, gaps 0..39, 70, 200, 12000 clipped to the source ranges; `addsub_all_27_bigint_random`: 2,000 pairs per combination, each checked in six operation/mode cases; `addsub_all_27_bigint_million`: 1,000,000 pairs per combination with wall-time output |
 | Addition/subtraction range and zero | `addsub_largest_finite_underflow_and_cancellation`: both signs around destination maximum and minimum exponents, exact/directed overflow, inexact and rounded zero; `addsub_zero_cohorts_and_self_operations`: both-zero signs and extreme exponents, cancellation, equal-value cohorts, x+x, x-x, x-(-x) |
 | Multiplication | `mul_all_width_pairs_coefficient_exponent_sign_classes`: every pair of source coefficient representatives in each of the eight operand width pairs with at most one Decimal128 operand, and every third pair (offset by the first coefficient, so every representative of each side occurs) for two Decimal128 operands, exponent sums targeted at each result range, all four sign pairs, all three result widths and all three modes; `mul_decimal128_pair_every_coefficient_class_pair`: every pair of representatives for two Decimal128 operands with the same exponent sums, signs, result widths and modes; `mul_all_width_pairs_bigint_random`: 2,000 pairs per width pair, each into all result widths and modes; `mul_all_width_pairs_bigint_million`: 300,000 pairs per width pair, each into all three result widths and all three modes, with wall-time output |
@@ -1535,6 +1631,8 @@ establish the result for all members of each following disjoint path class.
 
 | Partition of finite inputs | Why members share the path and result rule | Tests exercising the partition |
 |---|---|---|
+| Integer/scale construction: zero/nonzero; either sign; magnitude below 2^127/at 2^127; precision fits/exceeds P; preferred exponent below/within/above range; exact remainder/sticky; no direction/either direction | Unsigned magnitude and widened scale negation preserve all inputs; the sole 2^127 magnitude is reduced with a sticky fraction within fit's domain. Existing fitting and overflow rules cover every resulting coefficient, exponent and mode | `int_scale_construction_boundary_classes`, `int_scale_construction_fixed_seed_differential` |
+| Integer/scale decomposition: every width; both signs; zero/nonzero; both accepted coefficient forms; every exponent | Stored coefficient and exponent bounds fit the output types. Preserving these fields makes reconstruction bit-identical except that integer zero carries no sign | `int_scale_decomposition_classes_and_roundtrip`, `int_scale_decomposition_fixed_seed_bits`, `int_scale_documented_contract`, ignored `int_scale_decimal32_exhaustive_reference`; the class test also checks infinity and quiet/signaling NaN rejection |
 | Finite extraction: Decimal128 finite canonical small form; Decimal32/Decimal64 both finite coefficient forms | Decimal128's excluded form has coefficient >=2^113, above its maximum; after special classification, fixed field extraction equals general decoding on every finite canonical value | `comparison_decimal128_canonical_storage_boundary` checks 64/112-bit limb boundaries, the maximum and first invalid coefficient, and both excluded finite combination extremes against independent decoding; `comparison_alignment_boundaries_all_width_pairs`, `comparison_extreme_exponents_all_width_pairs` and `cohort_hashes_cross_width_and_zero_signs` check public comparison against independent decoding and hashing; `decimal128_construction_paths_store_small_form` checks constants, parsing including `FromStr`, decoding, quantize, widening including Decimal32/Decimal64 values rounded to a multiple, addition and subtraction with and without a rounding direction for all nine operand width pairs, and multiplication with and without a rounding direction for all nine operand width pairs into Decimal128, and rounding to a multiple; it filters out special results and requires at least one successful finite result for each path and width pair, and asserts the stored coefficient and exponent of a rounded parse and a rounded addition that carry out of 34 digits; `decimal128_from_bits_rejects_large_form` checks the finite large-form extremes (combination field 24 to 29, both signs, low 122 bits all zero or all one) and 100,000 patterns with a combination field drawn from 24 to 29 and random sign and low 122 bits |
 | Comparison: special/finite; P=7/16 direct or clamped alignment; P=34 signed alignment at gaps 0..4, or larger gaps with different/equal adjusted exponents | Class handling and identical-bit shortcuts preserve NaN and infinity rules; clamping preserves P=7/16 order; P=34 small-gap alignment stays below `10^38`, and larger-gap digit intervals decide different adjusted exponents while equality bounds the single exact alignment product below `10^34` | `comparison_alignment_boundaries_all_width_pairs`, `comparison_extreme_exponents_all_width_pairs`, and `comparison_exponent_gap_digit_guard_and_sign_classes` cross all widths, signs, zeros, exponent gaps and cohort neighbors; P=16 and P=34 ordering also have the whole-domain Verus proofs above |
 | Equality: Decimal32/Decimal64 identical bits; P=7/16 direct coefficient equality at equal exponents or clamped alignment otherwise; for P=34, gap magnitude <=4 or >4; both/one/no zero; equal/different signs; gap magnitude 1..33 or >=34; aligned product fits/overflows u128 | Exact alignment is necessary and sufficient; overflow and gaps >=34 cannot match a supported coefficient. These disjoint decisions exhaust all finite pairs and agree with OrderedDecimal Ord and decimal PartialOrd | `comparison_alignment_boundaries_all_width_pairs` covers all nine pairs and both orders, all gaps 0..39, coefficient maxima, exact cohort neighbors and checked-product overflow neighbors; `comparison_extreme_exponents_all_width_pairs` covers maximal cross-width gaps and zero signs; the other comparison and cohort tests in `src/compare_tests.rs` also apply |

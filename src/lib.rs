@@ -43,6 +43,17 @@
 //!   on the rounding direction, a call without a direction gives +0.
 //! - No operation panics; failures are reported through [`Result`].
 //!
+//! # Features
+//!
+//! The optional `serde` feature implements `Serialize` and `Deserialize` for
+//! all three decimal types and [`OrderedDecimal<T>`], keeping `no_std` without
+//! requiring allocation. Serialization uses [`Display`](core::fmt::Display)
+//! strings. Deserialization accepts strings or exact integers and requires
+//! a format supporting `deserialize_any`. Fractional values must be sent as
+//! strings; floating-point inputs are rejected. String round trips do not
+//! retain positive exponents (`1E+5` becomes `"100000"`) or NaN sign, payload,
+//! or signaling state. `OrderedDecimal<T>` delegates to its wrapped value.
+//!
 //! # Example
 //!
 //! ```
@@ -79,6 +90,8 @@ mod operand;
 mod ordered;
 mod parse;
 mod rounding;
+#[cfg(feature = "serde")]
+mod serde_support;
 mod tables;
 mod types;
 #[cfg(verus_keep_ghost)]
@@ -110,6 +123,8 @@ mod fit_tests;
 #[cfg(test)]
 mod format_tests;
 #[cfg(test)]
+mod int_scale_tests;
+#[cfg(test)]
 mod kernel_tests;
 #[cfg(kani)]
 mod layout_proofs;
@@ -123,6 +138,8 @@ mod parse_tests;
 mod quantize_tests;
 #[cfg(test)]
 mod refbid;
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests;
 #[cfg(test)]
 mod special_tests;
 #[cfg(test)]

@@ -35,6 +35,16 @@ fn main() -> Result<(), Error> {
 }
 ```
 
+## Features
+
+Enable `serde` for `Serialize` and `Deserialize` on all three decimal types
+and `OrderedDecimal<T>`. Serialization uses `Display` strings.
+Deserialization accepts strings or exact integers and requires a format
+supporting `deserialize_any`. Fractional values must be sent as strings;
+floating-point inputs are rejected. Strings preserve the value but do not
+retain positive exponents or NaN sign, payload, or signaling state.
+The feature keeps `no_std` and does not require allocation.
+
 ## Operations
 
 Methods without a direction return the exact result or an error; `_rounded`
@@ -56,6 +66,9 @@ zero: `1 / 0` is an infinity and `0 / 0` is NaN; see
 | Sign | `-x`, `x.abs()`, `x.copysign(y)`; `is_sign_negative`, `is_sign_positive` | Same as `x` / `bool` | None; always exact |
 | Widening | `From` | Wider type | None; always exact (a NaN becomes quiet) |
 | Narrowing | `TryFrom`, `Decimal32::from_d64_rounded`, `Decimal32::from_d128_rounded`, `Decimal64::from_d128_rounded` | Narrower type | Without / with |
+| Components | `coefficient()`, `mantissa()` (alias), `exponent()`, `scale()` (= −exponent); finite values only | `Result<i32/i64/i128>` / `Result<i32>` | None |
+| Coefficient and exponent | `T::from_coefficient_and_exponent(coefficient, exponent)`, `_rounded` variant, `x.to_coefficient_and_exponent()` | `T` / `(i32/i64/i128, i32)` | Without / with for construction |
+| Mantissa and scale | `T::from_mantissa_and_scale(mantissa, scale)`, `T::from_mantissa_and_scale_rounded(mantissa, scale, dir)`, `x.to_mantissa_and_scale()`; value = integer × 10^(−scale) | `T` / `(i32/i64/i128, i32)` | Without / with for construction |
 | Parsing | `T::parse(s)`, `str::parse`, `T::parse_rounded(s, dir)` | `T` | Without / with |
 | Formatting | `Display`; `x.stripped()` removes trailing fractional zeros | Text | None; never rounds |
 | Comparison | `==`, `<` and the other comparison operators within and across widths (a NaN is unordered); `total_cmp` (IEEE 754-2019 totalOrder); `is_zero`, `is_positive`, `is_negative` | `bool` / `Option<Ordering>` / `Ordering` | None |
@@ -79,7 +92,7 @@ the obligations without a direct machine proof are listed separately there.
 | Goal 1: exact or explicit | Met | [VERIFICATION.md](docs/VERIFICATION.md): Integer obligations, Class coverage argument, Infinity and NaN |
 | Goal 2: proven correct | Met | [VERIFICATION.md](docs/VERIFICATION.md): Integer obligations, Exhaustive and differential evidence, Class coverage argument, Infinity and NaN |
 | Goal 3: compact | Met | Compile-time size assertion for each type in `src/types.rs` |
-| Goal 4: pure Rust | Met | Empty `[dependencies]` in `Cargo.toml` (dev-dependencies serve tests and benchmarks only); `#![no_std]` and `forbid(unsafe_code)` in `src/lib.rs` for every normal build (it is lifted only under the Verus verification cfg, see `docs/VERIFICATION.md`) |
+| Goal 4: pure Rust | Met | Only optional `serde` in `[dependencies]`, without default features; `#![no_std]` and `forbid(unsafe_code)` in `src/lib.rs` for every normal build (it is lifted only under the Verus verification cfg, see `docs/VERIFICATION.md`) |
 | Addition and subtraction | Met | [VERIFICATION.md](docs/VERIFICATION.md): Bounded-gap exact sum, Exact addition and subtraction, Compressed addition and subtraction |
 | Multiplication | Met | [VERIFICATION.md](docs/VERIFICATION.md): Exact product |
 | Division | Met | [VERIFICATION.md](docs/VERIFICATION.md): Division |
