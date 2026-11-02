@@ -7,6 +7,8 @@ use serde_test::{
 use std::format;
 use std::string::ToString;
 
+use crate::format_tests::short_text_boundary;
+use crate::refbid::{self, Format};
 use crate::{Decimal32, Decimal64, Decimal128, OrderedDecimal};
 
 trait Bits: Copy {
@@ -205,6 +207,36 @@ macro_rules! serde_width_tests {
                     match expected {
                         Ok(expected) => assert_eq!(actual.unwrap().to_bits(), expected),
                         Err(error) => assert!(actual.unwrap_err().to_string().contains(&error.to_string())),
+                    }
+                }
+            }
+
+            #[test]
+            fn readable_serializes_display_around_stack_text_limit() {
+                let format = match <$decimal>::DIGITS {
+                    7 => Format::D32,
+                    16 => Format::D64,
+                    _ => Format::D128,
+                };
+                let mut lengths = std::collections::BTreeSet::new();
+                for v in short_text_boundary(format) {
+                    let value = <$decimal>::from_bits(refbid::encode(v, format) as $bits).unwrap();
+                    let text: &'static str = value.to_string().leak();
+                    lengths.insert(text.len());
+                    assert_ser_tokens(&value.readable(), &[Token::Str(text)]);
+                    assert_ser_tokens(&OrderedDecimal(value).readable(), &[Token::Str(text)]);
+                    // The text reads back as the same number, at the
+                    // exponent its parse gives.
+                    let parsed = <$decimal>::parse(text).unwrap();
+                    assert_eq!(parsed, value);
+                    assert_de_tokens(&Bitwise(parsed).readable(), &[Token::Str(text)]);
+                }
+                // Both sides of the limit are covered wherever the width
+                // can produce text that long.
+                let limit = crate::display::TEXT_LEN;
+                if lengths.last().is_some_and(|&max| max > limit) {
+                    for len in [limit - 1, limit, limit + 1] {
+                        assert!(lengths.contains(&len), "{len}");
                     }
                 }
             }

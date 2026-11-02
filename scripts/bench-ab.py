@@ -50,7 +50,12 @@ import tarfile
 import tomllib
 from pathlib import Path
 
-TIMED = ("finite", "keys", "special", "ops")
+# Criterion targets run when no `--bench` is given.
+DEFAULT_TIMED = ("finite", "keys", "special", "ops")
+# Every Criterion target; the others run only when named with `--bench`.
+TIMED = (*DEFAULT_TIMED, "serde")
+# Criterion targets that need library features, as their `required-features`.
+FEATURES = {"serde": ["--features", "serde"]}
 COUNTED = "instructions"
 COUNTED_CARGO = ["--profile", "bench-instructions", "--package", "bidecimal-instructions", "--bench", COUNTED]
 SIDES = ("base", "candidate")
@@ -189,6 +194,11 @@ def profile_settings(manifest, name):
     return "; ".join(chain)
 
 
+def selected_targets(bench):
+    """The targets named with `--bench`, or the default Criterion targets."""
+    return list(bench) if bench else list(DEFAULT_TIMED)
+
+
 def build(tree, target, profile, jobs, compiler, log):
     """Builds `target` in `tree` with `compiler` and returns its executable,
     or None when the library builds and only the benchmark code fails, with
@@ -196,7 +206,7 @@ def build(tree, target, profile, jobs, compiler, log):
     benchmark uses an item the library lacks or has with another signature or
     visibility. Any other failure exits. The build output goes to `log`."""
     check_build_environment([tree])
-    selection = COUNTED_CARGO if target == COUNTED else ["--profile", profile, "--bench", target]
+    selection = COUNTED_CARGO if target == COUNTED else ["--profile", profile, "--bench", target, *FEATURES.get(target, [])]
     command = ["cargo", "bench", "--locked", "--no-run", "--message-format=json", "--jobs", str(jobs), *selection]
     env = {
         **os.environ,
@@ -487,7 +497,8 @@ def main():
         "--bench",
         action="append",
         choices=[*TIMED, COUNTED],
-        help=f"benchmark target, repeatable (default: the Criterion targets {', '.join(TIMED)})",
+        help=f"benchmark target, repeatable (default: the Criterion targets {', '.join(DEFAULT_TIMED)}; "
+        f"{', '.join(t for t in TIMED if t not in DEFAULT_TIMED)} only when named)",
     )
     parser.add_argument(
         "--profile", choices=["bench", "bench-fat-lto"], default="bench",
@@ -514,7 +525,7 @@ def main():
     for directory in (args.work, args.out):
         if directory.exists():
             fail(f"{directory} already exists; use a new directory")
-    targets = args.bench or list(TIMED)
+    targets = selected_targets(args.bench)
     if COUNTED in targets and args.filter is not None:
         fail("--filter selects Criterion benchmarks and cannot be used with instructions")
     if COUNTED in targets and args.profile == "bench-fat-lto":

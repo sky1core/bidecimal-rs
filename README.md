@@ -111,12 +111,19 @@ the obligations without a direct machine proof are listed separately there.
 
 ## Benchmarks
 
-`benches/finite.rs`, `benches/keys.rs`, `benches/special.rs`, and
-`benches/ops.rs` measure bidecimal's own operations. Before timing, the
+`benches/finite.rs`, `benches/keys.rs`, `benches/special.rs`,
+`benches/ops.rs`, and `benches/serde.rs` measure bidecimal's own operations.
+Before timing, the
 finite, keys, and ops benchmarks check their inputs and results against an
 exact reference, down to the sign, coefficient, and exponent of each decimal,
 and the special benchmark checks the comparisons and result
 classes of operations with an infinity or NaN operand against `f64`.
+The serde benchmark needs the `serde` feature; it checks each value's
+`Display` text, padded text, and `serde_json` string against text written
+from the decoded sign, coefficient, and exponent, and that the string reads
+back as the same number, then measures `serde_json` serialization and
+`Display` with and without padding, from short text to the longest finite
+text.
 Each Criterion benchmark warms up for 0.5 s, then takes 100 samples over
 about 1 s, with 2,000 bootstrap resamples for Criterion's own intervals; the
 median that `scripts/bench-ab.py` compares is the sample median and does not
@@ -145,13 +152,16 @@ or removes, not how long that code takes. It uses `bench-instructions`, which
 inherits `bench` and enables debug information.
 
 `scripts/bench-ab.py` (Python 3.12 or later) compares two commits on one
-machine: it builds both with the benchmark code of one commit, runs every
-Criterion target, or those given with `--bench`, for each side in alternating
+machine: it builds both with the benchmark code of one commit, runs the
+finite, keys, special, and ops Criterion targets, or those given with
+`--bench`, for each side in alternating
 order, and reports each benchmark's median time and range per side and the
 candidate/base ratio, the median over rounds of the ratio of the two runs of
 each round taken on a log scale, largest change first. A ratio within the
 spread of an A/A comparison, the same commit on both sides, on the same
-machine is noise. With `--bench instructions`, it counts the instructions of
+machine is noise. The serde target runs only when named with `--bench serde`
+and is built with `--features serde` on both sides. With `--bench instructions`,
+it counts the instructions of
 each side once and reports the counts and their ratio. A target whose
 benchmark code does not compile against the base library because it uses an
 item the library lacks or has with another signature or visibility is reported
