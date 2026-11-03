@@ -81,7 +81,20 @@ adapter keeps numeric equality from hiding cohort, zero-sign, or NaN-field
 changes. The 128-bit integer cases use serde's integer value deserializers.
 
 Serialization writes the `Display` text without flags as one string. Special
-values write `NaN`, `inf` or `-inf`. A finite value's digits are written once
+values write `NaN`, `inf` or `-inf`. Finite values whose coefficient fits
+`u64` are first classified by `serde_support::lane`. For exponent `e >= 0`,
+the scaled magnitude `c * 10^e` must fit `u64`; a negative result must also
+fit `i64`, including `i64::MIN`. These integers use std `format_into`; a
+negative zero with `e >= 0`, which no integer type holds, is written `-0`.
+For `e < 0`, the fractional lane admits `-e <= 46` without a minus sign or
+`-e <= 45` with one, keeping the text within 48 bytes. It writes right-aligned
+8-digit blocks into a 48-byte buffer filled with ASCII `0` bytes. When the decimal
+point is inside the digits, a fixed 24-byte move makes room for it. The actual
+text is checked as UTF-8 once. The selected text is passed to `serialize_str`
+once. Failure to assemble an admitted value returns a serializer error,
+without retrying another path.
+
+Other finite values retain the `Parts` path. Their digits are written once
 into `Parts` (sign, digit string, exponent), the same pieces padded `Display`
 uses. A nonnegative value with exponent zero is its digits alone and is passed
 to `serialize_str` directly. Otherwise `text_len` gives the length, sign
@@ -91,6 +104,16 @@ written by `Parts::write_text` (the sign, then `write_magnitude`) into a
 because the length was checked first the buffer cannot fill, and a write or
 UTF-8 failure is returned as a serializer error, not routed to another path.
 Longer text is streamed through `collect_str` from the same `Parts` and writer.
+The two lane tests, `serde_small_lane_direct_lengths_and_exponents` and
+`serde_small_lane_direct_integer_and_point_boundaries`, check eligibility and
+text boundaries; `serde_only_lane_public_boundaries` checks public serialization.
+The SWAR test `small_eight_all_100_million_match_format` is ignored by default;
+run it explicitly with:
+
+```sh
+cargo test --release --features serde -- --ignored small_eight_all_100_million_match_format
+```
+
 `readable_serializes_display_around_stack_text_limit` checks, for every width,
 that values whose text is 111, 112 and 113 bytes long, wherever the width
 reaches those lengths, serialize to their `Display` text, which `parse` reads

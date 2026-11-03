@@ -262,3 +262,39 @@ macro_rules! serde_width_tests {
 serde_width_tests!(decimal32, Decimal32, u32);
 serde_width_tests!(decimal64, Decimal64, u64);
 serde_width_tests!(decimal128, Decimal128, u128);
+
+#[test]
+fn serde_only_lane_public_boundaries() {
+    // Plain exact input spelling is the independently stated JSON string oracle.
+    for text in [
+        "0",
+        "-0",
+        "-0.00",
+        "123.4500",
+        "99999999",
+        "100000000",
+        "9999999999999999",
+        "10000000000000000",
+        "9223372036854775807",
+        "-9223372036854775808",
+        "18446744073709551615",
+        "18446744073709551616",
+        "1844674407370955161.5",
+        "1844674407370955161.6",
+    ] {
+        let value = Decimal128::parse(text).unwrap();
+        assert_ser_tokens(&value, &[Token::Str(text)]);
+    }
+    // serde_test tokens require static strings; retain all six boundary spellings.
+    for text in [
+        "0.000000000000000000000000000000000000000000001", // 44 leading fractional zeros
+        "-0.000000000000000000000000000000000000000000001", // 44 leading fractional zeros
+        "0.0000000000000000000000000000000000000000000001", // 45 leading fractional zeros
+        "-0.0000000000000000000000000000000000000000000001", // 45 leading fractional zeros
+        "0.00000000000000000000000000000000000000000000001", // 46 leading fractional zeros
+        "-0.00000000000000000000000000000000000000000000001", // 46 leading fractional zeros
+    ] {
+        let value = Decimal128::parse(text).unwrap();
+        assert_ser_tokens(&value, &[Token::Str(text)]);
+    }
+}

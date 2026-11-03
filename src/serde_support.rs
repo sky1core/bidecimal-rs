@@ -1,5 +1,7 @@
 use core::fmt;
 
+mod lane;
+
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -50,6 +52,34 @@ macro_rules! decimal_serde {
             fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
                 match Sealed::class(*self) {
                     Class::Finite(v) => {
+                        // Reject wide coefficients before creating lane buffers.
+                        if let Ok(coeff) = u64::try_from(v.coeff)
+                            && let Some(value) = lane::SmallValue::new(v.neg, coeff, v.exp)
+                        {
+                            let mut small: lane::SmallText;
+                            let mut unsigned: fmt::NumBuffer<u64>;
+                            let mut signed: fmt::NumBuffer<i64>;
+                            let text = match value {
+                                lane::SmallValue::Unsigned(integer) => {
+                                    unsigned = fmt::NumBuffer::new();
+                                    integer.format_into(&mut unsigned)
+                                }
+                                lane::SmallValue::Signed(integer) => {
+                                    signed = fmt::NumBuffer::new();
+                                    integer.format_into(&mut signed)
+                                }
+                                lane::SmallValue::NegativeZero => "-0",
+                                lane::SmallValue::Fraction { neg, coeff, exp } => {
+                                    small = lane::SmallText::new();
+                                    small.text(neg, coeff, exp).map_err(|_| {
+                                        <S::Error as serde::ser::Error>::custom(
+                                            "decimal text does not fit its buffer",
+                                        )
+                                    })?
+                                }
+                            };
+                            return serializer.serialize_str(text);
+                        }
                         let mut digits = crate::display::Digits::new();
                         let parts = digits.parts(v, false);
                         if let Some(text) = parts.digits_only() {
