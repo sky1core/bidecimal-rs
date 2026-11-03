@@ -69,7 +69,7 @@ cargo test --locked --features serde
 To run only the Serde tests:
 
 ```sh
-cargo test --locked --features serde --lib serde_tests
+cargo test --locked --features serde --lib serde
 ```
 
 `src/serde_tests.rs` checks the public serde implementations for all three
