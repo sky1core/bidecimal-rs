@@ -77,8 +77,9 @@ macro_rules! decimal_type {
         ///
         /// # Infinity and NaN
         ///
-        /// Operations give the IEEE 754-2019 results for infinity and NaN
-        /// operands; status flags are not provided. Apart from the sign
+        /// Decimal operations give the IEEE 754-2019 results for infinity
+        /// and NaN operands; status flags are not provided. Binary conversions
+        /// use the project bit policy documented on their methods. Apart from the sign
         /// operations, which change only the sign bit, a NaN operand gives a
         /// quiet NaN with the sign and payload of the first NaN operand, and a
         /// payload that does not fit the result type becomes zero. Only the
@@ -992,6 +993,81 @@ macro_rules! decimal_type {
                     return Ok(Self::nan(neg, 0));
                 }
                 Err(Error::InvalidInput)
+            }
+
+            /// Converts the exact decimal value to binary64, rounding once to
+            /// nearest with ties to even. Overflow gives signed infinity;
+            /// underflow gives a subnormal or signed zero. No allocation occurs.
+            ///
+            /// A NaN keeps its sign and becomes quiet. Its numerical payload
+            /// is kept if it fits 51 bits, otherwise it becomes zero. This is
+            /// the project's IEEE-2008 interchange-bit policy, not a guarantee
+            /// about historical hardware signaling conventions.
+            #[must_use]
+            pub fn to_f64(self) -> f64 {
+                crate::binary::to_f64(self.class())
+            }
+
+            /// Converts the exact decimal value directly to binary32,
+            /// rounding once to nearest with ties to even, without an f64
+            /// intermediate. Overflow gives signed infinity; underflow gives
+            /// a subnormal or signed zero. No allocation occurs.
+            ///
+            /// A NaN keeps its sign and becomes quiet. Its numerical payload
+            /// is kept if it fits 22 bits, otherwise it becomes zero, under
+            /// the same project bit policy as [`to_f64`](Self::to_f64).
+            #[must_use]
+            pub fn to_f32(self) -> f32 {
+                crate::binary::to_f32(self.class())
+            }
+
+            /// Rounds the exact binary64 input once to nearest with ties to
+            /// even, retaining at most `min(Self::DIGITS, f64::DIGITS)`
+            /// significant decimal digits, then removes fractional trailing
+            /// zeros using [`trim_fraction_zeros`](Self::trim_fraction_zeros).
+            /// Thus Decimal32 retains at most seven significant digits, and
+            /// Decimal64 and Decimal128 at most fifteen. This does not parse
+            /// the input's shortest displayed string or round twice.
+            ///
+            /// Overflow gives signed infinity; gradual underflow or rounding
+            /// to zero follows the destination range. A zero result has
+            /// exponent zero and preserves its sign. Binary64 subnormals can
+            /// retain noisy digits: the minimum positive subnormal becomes
+            /// `4.94065645841247E-324` in Decimal64 and Decimal128.
+            ///
+            /// Infinity keeps its sign. A NaN keeps its sign and becomes
+            /// quiet; its integer payload is kept if it fits this decimal
+            /// format, otherwise it becomes zero. This project rule uses
+            /// the IEEE-2008 interchange quiet-bit convention. No allocation,
+            /// error value or status flag is produced.
+            #[must_use]
+            pub fn from_f64(value: f64) -> Self {
+                Self::from_binary(crate::binary::from_f64::<$width>(value))
+            }
+
+            /// Rounds the exact binary32 input once to nearest with ties to
+            /// even, retaining at most `min(Self::DIGITS, f32::DIGITS)` (six)
+            /// significant decimal digits, then applies
+            /// [`trim_fraction_zeros`](Self::trim_fraction_zeros).
+            ///
+            /// A zero result has exponent zero and preserves its sign.
+            /// Infinity and NaN use the same sign, quieting and integer-payload
+            /// policy as [`from_f64`](Self::from_f64). Every finite binary32
+            /// value fits the range of every decimal width. This method does
+            /// not allocate, report status flags or return an error.
+            #[must_use]
+            pub fn from_f32(value: f32) -> Self {
+                Self::from_binary(crate::binary::from_f32::<$width>(value))
+            }
+
+            fn from_binary(value: crate::binary::Converted<$width>) -> Self {
+                match value {
+                    crate::binary::Converted::Finite(value) => {
+                        Self(layout::$encode(value)).remove_trailing_zeros::<true>()
+                    }
+                    crate::binary::Converted::Infinite(neg) => Self::infinite(neg),
+                    crate::binary::Converted::Nan { neg, payload } => Self::nan(neg, payload),
+                }
             }
 
             /// Removes trailing zeros from the fractional part of this value.

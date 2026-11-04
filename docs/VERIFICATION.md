@@ -9,7 +9,9 @@ two widths into any result width, quantize for all three widths, rounding to
 a multiple for all three widths, sign operations, integer/scale conversion,
 parsing, exact trailing-zero value transformations, allocation-free plain
 formatting with optional fractional zero stripping, and optional serde
-serialization.
+serialization. The binary floating-point conversion section records its
+contract, manual design obligations, fixed-version core parser dependencies,
+and completed checks with their limits separately from the existing results.
 It does not cover performance.
 Test-only reference decoding reconstructs the interchange sign, combination
 field, exponent continuation, and coefficient independently of the library's
@@ -32,8 +34,9 @@ storage is constructed from validated bits, finite constants, exact widening,
 addition and subtraction, multiplication and parsing, quantize output and the
 unit-step multiple result with explicitly checked coefficient and exponent
 bounds, the bounded coefficient/exponent transformation described below, the
-encoded zero at qmin for finite/infinity division, or a sign operation on
-stored bits, which changes only the sign bit. Special
+encoded zero at qmin for finite/infinity division, the in-range finite binary
+conversion result described below, or a sign operation on stored bits,
+which changes only the sign bit. Special
 constants and result constructors produce canonical special encodings.
 After special classification, unpacking a finite value has coefficient
 `0 <= c < 10^P` and `qmin <= q <= qmax`. Widening preserves these fields and
@@ -59,6 +62,352 @@ same value fields or error kind; the native entry point also guarantees
 agreement with every result satisfying that contract. No new trusted
 standard-library specification is used. Public dispatch, finite extraction
 and encoding, and overflow mapping remain outside this Verus proof.
+
+## Binary floating-point conversion
+
+The four inherent methods on each width are manually written conversions,
+with the contract in [SPEC.md](SPEC.md#binary-floating-point-conversion).
+`to_f64` and `to_f32` pass exact decimal text to the core floating-point
+parser for binary rounding.
+`from_f64` rounds the exact binary rational once to `min(P,15)` significant
+decimal digits; `from_f32` uses `min(P,6)`. The destination's minimum exponent
+is included in the same rounding. Both then use the existing fractional-zero
+trimming rule, with exponent zero for every zero result and the source sign
+retained. `to_f64` and `to_f32` round the exact decimal directly to the named
+binary format. These are value-returning methods, not additional modes of
+the arithmetic, parsing, quantize, width-conversion or serde APIs.
+
+**Verification status: the checks below passed.** The 21 gate invocations
+and the ordinary independent-reference tests completed on
+2026-11-04. Full Decimal32 and binary32 raw-input coverage was completed on
+2026-11-05. No runtime performance result is claimed. Existing results
+elsewhere in this document cover their named operations, not additional
+conversion coverage. No direct
+Verus or Kani proof of the new methods is claimed; running the existing Verus
+suite cannot extend its proof domain to them.
+
+### Bounded implementation obligations
+
+The finite binary-to-decimal design decodes the source bits as `m * 2^e`
+with the sign handled separately. Before cancellation, binary64 has
+`m < 2^53` and `-1074 <= e <= 971`; binary32 has `m < 2^24` and
+`-149 <= e <= 104`. Zero and nonfinite values are handled before this path.
+When e is negative, removing powers of two from m while e remains negative
+preserves the exact value. The remaining expansion is `m * 5^(-e) * 10^e`
+for e below zero, or integer `m * 2^e` at decimal exponent zero otherwise.
+No binary floating-point arithmetic or shortest decimal spelling participates
+in this expansion or its decimal rounding.
+
+The manual bounds to establish in the implementation are:
+
+1. **Exact fixed-size expansion.** An 86-limb base-`10^9` array holds 774
+   decimal digits. The negative-exponent integer is less than
+   `2^53 * 5^1074 < 10^767`; a nonnegative-exponent binary64 value is less
+   than `2^1024 < 10^309`. Binary32 is a subset of these bounds. Each
+   multiplication step is exact, and the full final expansion fits the
+   array; intermediate products are no larger. Multipliers at most `5^12`
+   or `2^29` keep `limb * multiplier + carry < 10^9 * 2^29 < 2^59`, with
+   carry below the multiplier. Every limb index and final carry append must
+   follow from these bounds. Each iteration reduces the remaining power,
+   proving termination. An 800-byte digit buffer exceeds the maximum 767
+   digits; writing each base-`10^9` limb must preserve internal zero digits.
+2. **One rounding decision.** Let L be the exact digit count, q the exact
+   decimal exponent, and K the selected 7, 15 or 6 digits. Choose
+   `drop = max(L-K, qmin-q, 0)` once. The retained prefix, first discarded
+   digit, and whether any later discarded digit is nonzero determine the
+   exact remainder relative to half a unit. Increment only above half, or
+   at half with an odd retained coefficient. Discards longer than L have
+   implicit leading zero digits and must not index outside the buffer; they
+   are below half a unit. A discard of exactly L includes the half-minimum
+   case and uses the zero prefix's even parity. This combines precision and
+   underflow without a second rounding.
+3. **Carry, fitting and trimming.** Before rounding the retained coefficient
+   is below `10^K`; afterward it is at most `10^K`. Equality is normalized by
+   exact division by ten and an exponent increment. A result exponent above
+   `qmax` is reduced only by exact coefficient zero padding within the full
+   P-digit capacity. Failure of that capacity test is rounded overflow, not
+   a second precision rounding. No finite source other than binary64 to
+   Decimal32 can exceed a destination decimal range. All stored finite
+   results must satisfy `c < 10^P` and `qmin <= q <= qmax` before the existing
+   private fractional-zero trimming helper is called. Zero takes a separate
+   signed, exponent-zero path. Trimming is exact and cannot alter the rounded
+   numerical value.
+4. **Exact decimal text and destination-specific parsing.** A finite decimal
+   has at most 34 coefficient digits and exponent in `-6176..=6111`. Its
+   exact scientific notation needs at most 41 ASCII bytes: one sign,
+   34 digits, `e`, one exponent sign and four exponent digits. A 48-byte
+   stack buffer is sufficient. Its grammar has at least one coefficient
+   digit and one exponent digit, so both UTF-8 validation and core parsing
+   must succeed. Syntax-error or capacity-error branches are unreachable
+   from valid decimal storage; they are not numerical fallbacks. The f32
+   method must instantiate the f32 parser directly, never parse an f64 and
+   narrow it. No allocation or unsafe code is needed.
+5. **Specials and canonical storage.** Classification precedes every finite
+   extraction or expansion. Infinity and zero keep the source sign; binary
+   zero and underflow zero become decimal exponent zero. NaN sign and integer
+   payload are handled by masks and bit conversion, not float arithmetic.
+   A payload is copied only below `10^(P-1)`, `2^22`, or `2^51`, according to
+   the destination, and otherwise becomes zero. The destination encoding is
+   quiet and canonical. Source NaN signaling state is not preserved.
+
+These are whole-domain mathematical bounds and obligations for the manual
+code, not a direct machine proof of its indexing, integer arithmetic, dispatch,
+or composition. The source review checks how these arguments apply at each call site;
+the finite enumeration below checks their numerical premises. Neither is a
+direct machine proof of the Rust implementation.
+
+### Checked integer-argument premises
+
+`binary_float_integer_argument_premises` checks the finite numerical premises
+of the arguments above, separately from the independent conversion oracle:
+
+- It matches the actual sealed width constants and `f32::DIGITS`/`f64::DIGITS`
+  to the stated formats, including exponent-zero representability.
+- BigUint enumeration at every expansion exponent checks the maximum
+  significand envelopes below `10^767` or `10^309`. Monotonicity bounds every
+  smaller significand and every intermediate product. An initial significand
+  is below `10^18`, so two base-`10^9` limbs suffice; 86 limbs and the 800-byte
+  buffer hold the entire expansion.
+- Every chunk factor (`5^k`, k=0..12, and `2^k`, k=0..29) is checked. For radix
+  B and factor F, `(B-1)*F+(F-1)=B*F-1<2^59`; thus each multiply/add is exact,
+  its quotient is below F and its remainder below B. Induction over limbs
+  proves exact multiplication with bounded carry. Formatting the top limb
+  without padding and every remaining limb with nine digits preserves zeros.
+- All finite binary exponent fields and possible significand trailing-zero
+  counts satisfy the decoded and cancelled exponent/shift bounds. Cancelling
+  a factor two preserves the value; each chunk step decreases its remaining
+  nonnegative exponent, so the loops terminate.
+- Every length 1..767, quantum -1074..0 and destination/source-precision pair
+  is checked for retained-prefix, guard-tail, discard and exponent bounds.
+  The guard/sticky/parity truth table covers below-half, exact-half and
+  above-half remainder classes. Every allowable padding power is checked to
+  fit u128, and every precision K is checked to lie in 6..=15 with
+  `10^K < u128::MAX`, so the increment cannot overflow.
+- Argued rather than enumerated: a retained n-digit prefix is below `10^n`,
+  since appending a digit preserves this by induction; the sole `10^K` carry
+  is exactly divisible by ten. The production code multiplies with checked
+  arithmetic, and its range comparison rejects any coefficient outside
+  `c<10^P` before construction.
+- Every destination exponent at its maximum-width negative coefficient fits
+  the 41-byte ASCII scientific-text bound. Shorter coefficients and a positive
+  sign cannot require more space. Classification handles zero and nonfinite
+  values before these finite routines; the payload-mask and destination-fit
+  arguments are tested independently by the signed-special cases.
+
+This meets SPEC Verification item 1 with manual integer proofs and enumerated
+numerical premises, not a machine proof of their implementation. Private
+production array sizes and chunk literals are matched to these bounds by
+source review, not exported into the oracle. Core parser correctness retains
+the dependency and limitations below. Items 2–4 are supported respectively by
+the recorded exhaustive Decimal32 checks, the independent exact-rational
+comparisons, and the class partition and arguments below.
+
+### Fixed-version core parser contract
+
+The core parser is an external numerical dependency of `to_f64` and
+`to_f32`, not the test oracle. The following fixed public Rust sources establish
+the intended contract and dispatch for MSRV 1.98.0 and Rust 1.99.1:
+
+| Property | Rust 1.98.0 | Rust 1.99.1 |
+|---|---|---|
+| Public parsing contract; distinct f32 and f64 `FromStr` implementations | [float_parse.rs, lines 54–78](https://github.com/rust-lang/rust/blob/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/num/float_parse.rs#L54-L78) | [float_parse.rs, lines 54–78](https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/num/float_parse.rs#L54-L78) |
+| Exact input rounded nearest, ties to even; why direct target precision is required | [dec2flt/mod.rs, lines 9–47](https://github.com/rust-lang/rust/blob/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/num/imp/dec2flt/mod.rs#L9-L47) | [dec2flt/mod.rs, lines 9–47](https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/num/imp/dec2flt/mod.rs#L9-L47) |
+| Destination-typed dispatch, full-input fallback for ambiguous prefixes, and sign restoration | [dec2flt/mod.rs, lines 202–256](https://github.com/rust-lang/rust/blob/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/num/imp/dec2flt/mod.rs#L202-L256) | [dec2flt/mod.rs, lines 202–256](https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/num/imp/dec2flt/mod.rs#L202-L256) |
+| Target-width arithmetic and exact bounds on the short path | [decimal.rs, lines 54–88](https://github.com/rust-lang/rust/blob/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/num/imp/dec2flt/decimal.rs#L54-L88) | [decimal.rs, lines 54–88](https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/num/imp/dec2flt/decimal.rs#L54-L88) |
+| Subnormal rounding, ties, carry and overflow | [lemire.rs, lines 26–113](https://github.com/rust-lang/rust/blob/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/num/imp/dec2flt/lemire.rs#L26-L113) | [lemire.rs, lines 26–113](https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/num/imp/dec2flt/lemire.rs#L26-L113) |
+| Full-input fallback's normal/subnormal range handling and rounded carry | [slow.rs, lines 26–109](https://github.com/rust-lang/rust/blob/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/num/imp/dec2flt/slow.rs#L26-L109) | [slow.rs, lines 26–109](https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/num/imp/dec2flt/slow.rs#L26-L109) |
+| Fallback's explicit exact-half parity rule | [decimal_seq.rs, lines 93–123](https://github.com/rust-lang/rust/blob/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/num/imp/dec2flt/decimal_seq.rs#L93-L123) | [decimal_seq.rs, lines 93–123](https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/num/imp/dec2flt/decimal_seq.rs#L93-L123) |
+
+Valid generated decimal syntax returns a float even when its rounded value
+is a subnormal, signed zero or signed infinity; finite-range overflow is not
+a `ParseFloatError`. Range decisions include rounded carry: an exact value
+slightly above the largest finite value can still round to that finite value.
+The source uses destination type F through each path. Compile-time f64
+constants used for bounds are not a binary64 intermediate for an f32 input.
+This source evidence does not prove every parser input or the generated
+machine code, and independent exact-rational comparisons remain required.
+
+NaN handling bypasses parsing. Rust's bit-transport documentation states that
+`from_bits` preserves bits and distinguishes the IEEE-2008 quiet-bit
+interpretation used on x86 and ARM from the historical MIPS interpretation:
+[f32 in 1.98.0](https://github.com/rust-lang/rust/blob/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/num/f32.rs#L1248-L1275),
+[f32 in 1.99.1](https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/num/f32.rs#L1287-L1315),
+[f64 in 1.98.0](https://github.com/rust-lang/rust/blob/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/num/f64.rs#L1228-L1255),
+and [f64 in 1.99.1](https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/num/f64.rs#L1267-L1295).
+The project's mapping sets fraction bit 22 or 51 and treats only the lower
+bits as the integer payload. It does not rely on an incidental `NAN`
+constant's sign or payload and does not promise identical hardware signaling
+behavior on every architecture.
+
+The no_std cross-compilation target is `thumbv7em-none-eabihf`. Its fixed
+[Rust 1.98.0 definition](https://github.com/rust-lang/rust/blob/88d9e12ae178fab0fb5cc050a94da85685d449ea/compiler/rustc_target/src/spec/targets/thumbv7em_none_eabihf.rs)
+and [Rust 1.99.1 definition](https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/compiler/rustc_target/src/spec/targets/thumbv7em_none_eabihf.rs)
+identify ARMv7E-M with a hard-float ABI and single-precision FPU support;
+double-precision hardware is optional. The
+[Arm RTABI32 quiet-bit rule](https://github.com/ARM-software/abi-aa/blob/2025Q1/rtabi32/rtabi32.rst#L825-L833)
+also uses the set high fraction bit for quiet NaNs. These sources support the
+bit interpretation, not a claim that all external helper routines preserve
+NaN payloads or gradual underflow. Cross-compilation is not ARM runtime
+execution. Caller-modified floating-point environments and arbitrary foreign
+runtime helper replacements have not been validated here.
+
+### Independent reference and class coverage obligations
+
+Expected results must come from the existing test-only arbitrary-precision
+integer dependency. The reference independently decodes binary and BID fields
+and independently encodes each result. It must not call the production
+layout, kernel, conversion routines or core float parser for an expectation.
+For decimal-to-binary, form an exact numerator/denominator, determine the
+binary exponent with integer comparisons, then divide at the normal or
+subnormal significand unit. Compare twice the remainder with the denominator,
+using the quotient's parity at equality, and assemble the binary bits.
+For binary-to-decimal, independently form the binary rational, determine its
+decimal order by integer comparisons, and select the one rounding unit from
+K and qmin. Exact quotient/remainder rounding, exponent fitting and the
+fractional-zero policy determine the independently encoded BID result.
+This rational-division reference differs from the production fixed decimal
+expansion and guard/sticky implementation.
+
+| Input partition | Required checks and argument |
+|---|---|
+| Each decimal width; every exponent; coefficient zero/unit/maximum and neighbors of binary and decimal powers | Independent fields determine the exact rational and canonical encoding; compare target bits for both binary types, not text alone |
+| Every source binary exponent class; normal/subnormal/zero; significand extremes and neighbors | Bit decoding determines an exact rational in every class; expansion bounds cover every interior significand |
+| No discard or discard; precision- or qmin-limited; less/equal/more than half; retained even/odd; carry/no carry | The one quotient/remainder grid determines nearest-even throughout each class; include 15-, 7- and 6-digit ties and source neighbors |
+| Destination zero/subnormal/normal boundaries and overflow threshold, both signs | Exact comparisons distinguish the threshold and its neighbors; where a threshold is not representable in the source, use the source values bracketing it rather than asserting it is an input |
+| Exact and inexact decimal cohorts; exponent padding; fractional-zero trimming; signed zero | Compare full result fields and bits, including exponent zero for every binary-to-decimal zero; do not infer a cohort from formatted text |
+| Signed infinity; quiet/signaling NaN; payload zero/unit/maximum and both sides of each destination fit limit | Independently construct quiet output bits, preserve sign, and reset only an oversized payload; ordinary equality cannot test NaNs or zero signs |
+| Decimal-to-binary-to-decimal numerical round trips in the common normal finite range | At most 15 digits for Decimal64/Decimal128 via f64, seven for Decimal32 via f64, and six for every width via f32; no general binary bit round-trip or decimal cohort guarantee |
+| Ordered finite inputs, negative and positive, including zeros and range endpoints | `to_f32` and `to_f64` are monotone; exclude NaNs from numeric ordering and check zero signs separately |
+
+For the numerical round-trip domain, normal binary nearest-even rounding
+has relative error at most `2^-p`, with p=53 or p=24. The selected decimal
+precision K satisfies `10^K * 2^-p < 1/2`: K is 15 or seven through f64, and
+six through f32. For a K-digit decimal coefficient away from a power of ten,
+this puts the binary error below half a decimal unit. At an exact power of
+ten the lower neighboring decimal unit is ten times smaller, but the
+coefficient is also ten times smaller than the upper K-digit bound, so the
+same strict inequality applies. The source is therefore recovered by the
+single K-digit rounding when both formats are in the stated normal finite
+range. This argument concerns the numerical value, not a stored cohort.
+Nearest-even selection from the ordered binary values is nondecreasing,
+including transitions to signed zero and infinity; special NaN mappings are
+outside that numeric ordering.
+
+Required fixed cases are the SPEC examples: f64 `0.1`, `0.1+0.2`, `86.296`,
+`1e20`, `1.2345678901234568e17`, the smallest positive f64 subnormal, and
+f32 `0.1`. Tests must check actual result fields or bits, not only `Display`.
+The D64/D128 `1e20` result has coefficient `100000000000000` and exponent 6;
+the larger finite example has coefficient `123456789012346` and exponent 3.
+The smallest f64 result in those widths has coefficient `494065645841247`
+and exponent -338. Include the direct-f32 double-rounding counterexample
+from SPEC, both signs, and negative zero.
+
+Fixed-seed checks need at least 10,000 cases in each of the 12 method/width
+groups. Raw encodings and independently constructed finite cohorts exercise
+different domains and must be reported separately. The exhaustive Decimal32
+run must visit all `2^32` raw patterns in disjoint sign lanes, independently
+check canonical acceptance/rejection, and compare both binary outputs for
+every accepted value. A separate binary32-input run must compare all three
+`from_f32` outputs for every raw f32 pattern, including specials. There is no exhaustive binary64-input claim.
+
+### Implementation verification results
+
+| Check | Status |
+|---|---|
+| Final source review against the bounded implementation obligations | Manual static review and finite numerical-premise enumeration; no direct machine proof |
+| Fixed examples, boundary/cohort, signed-special and fixed-seed reference tests | Passed in both toolchain test suites |
+| Round-trip and monotonicity properties in their stated domains | Passed in both toolchain test suites |
+| All `2^32` Decimal32 raw patterns, both `to_f32` and `to_f64` | Passed with the independent reference; 3,844,000,002 accepted inputs, 450,967,294 rejected encodings and 7,688,000,004 output comparisons |
+| All `2^32` binary32 patterns into all three decimal widths | Passed with the independent reference using checkpoint prefixes plus bounded terminal ranges; 12,884,901,888 output comparisons |
+| Rust 1.99.1 fmt, two clippy, default/serde tests and doctests | Passed on 2026-11-05 for this source: default 127 pass/23 ignored, serde 145 pass/24 ignored, each doctest suite 7 pass |
+| Rust 1.99.1 no_std host and `thumbv7em-none-eabihf`, default and serde | Four builds passed; ARM cross-compilation only |
+| Five benchmark targets in correctness-only `--test` mode | Passed, including all 12 new method/width rows; no timing result |
+| MSRV Rust 1.98.0 | Original default/serde builds and tests passed on 2026-11-04; `binary_float` rerun on this source passed on 2026-11-05: 13 pass/4 ignored |
+| Existing pinned Verus suite | Passed; 386 items in 231 crate functions, with 7 trusted std specifications; no direct conversion proof |
+
+This source was checked on 2026-11-05 using Rust 1.99.1
+(`58cf8f9c3`) and MSRV Rust 1.98.0 (`88d9e12ae`) on Linux x86_64. All six
+invocations exited successfully. The 13 ordinary conversion tests include the new finite
+integer-premise enumeration; the four exhaustive conversion tests remain
+ignored in these runs. Their recorded full-domain results above are retained,
+not claimed as rerun results.
+
+| Toolchain | Command | Result |
+|---|---|---|
+| 1.99.1 | `cargo fmt --check` | Passed |
+| 1.99.1 | `cargo clippy --offline --all-targets --locked -- -D warnings` | Passed |
+| 1.99.1 | `cargo clippy --offline --all-targets --locked --features serde -- -D warnings` | Passed |
+| 1.99.1 | `cargo test --offline --locked` | 127 passed, 23 ignored; 7 doctests passed |
+| 1.99.1 | `cargo test --offline --locked --features serde` | 145 passed, 24 ignored; 7 doctests passed |
+| 1.98.0 | `cargo test --offline --locked binary_float` | 13 passed, 4 ignored |
+
+The 21 gate invocations, including the existing Verus suite, completed on
+2026-11-04 using Rust 1.99.1 and MSRV 1.98.0 on Linux x86_64. Full unit-test
+bodies took approximately 4–5 minutes each, excluding compilation. Ignored full-domain tests are counted separately.
+The following commands reproduce that original gate configuration.
+
+Rust 1.99.1:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo clippy --all-targets --locked --features serde -- -D warnings
+cargo test --locked
+cargo test --locked --features serde
+cargo test --doc --locked
+cargo test --doc --locked --features serde
+cargo build --lib --locked --no-default-features
+cargo build --lib --locked --no-default-features --features serde
+cargo build --locked --lib --no-default-features --target thumbv7em-none-eabihf
+cargo build --locked --lib --no-default-features --target thumbv7em-none-eabihf --features serde
+cargo bench --locked --features serde --bench ops -- --test
+cargo bench --locked --features serde --bench keys -- --test
+cargo bench --locked --features serde --bench finite -- --test
+cargo bench --locked --features serde --bench special -- --test
+cargo bench --locked --features serde --bench serde -- --test
+```
+
+With Rust/Cargo/Rustdoc 1.98.0 selected:
+
+```sh
+cargo build --lib --locked
+cargo build --lib --locked --features serde
+cargo test --locked
+cargo test --locked --features serde
+```
+
+Existing proof suite:
+
+```sh
+bash verification/verus-suite.sh
+```
+
+Full raw-input coverage was established on 2026-11-05 with Rust 1.99.1,
+default features and optimized test builds on Linux x86_64. Both Decimal32
+sign-lane tests exited successfully, each covering `2^31` inputs.
+
+Binary32 coverage combines the completed prefix `[0, 1879048192)` with four
+terminal ranges of `2^26` magnitudes per sign through `2^31`, for
+12,884,901,888 output comparisons. Every terminal range exited successfully
+using the same production code and independent oracle. Each sign's overlap
+checksum matched the corresponding prefix checkpoint difference modulo
+`2^128`; overlap replays are excluded from unique coverage. No successful
+exit of either interrupted full binary32 lane is claimed. The range-running
+harness is not in this repository. The repository commands below reproduce
+the full domain in one run per sign lane:
+
+```sh
+cargo test --locked binary_float_tests::binary_float_exhaustive_decimal32_positive -- --exact --ignored --nocapture --test-threads=1
+cargo test --locked binary_float_tests::binary_float_exhaustive_decimal32_negative -- --exact --ignored --nocapture --test-threads=1
+cargo test --locked binary_float_tests::binary_float_exhaustive_f32_positive -- --exact --ignored --nocapture --test-threads=1
+cargo test --locked binary_float_tests::binary_float_exhaustive_f32_negative -- --exact --ignored --nocapture --test-threads=1
+```
+
+The two sign lanes in each family may run concurrently. Complete the
+Decimal32 family before starting the binary32 family. No command above
+claims an ARM runtime test, exhaustive binary64 inputs, every other ignored
+suite, direct machine proof of the conversion methods, or timed API
+performance.
 
 ## Trailing-zero value transformations
 
@@ -122,7 +471,7 @@ and the separation from the generated presentation checks are given under
 
 ### Recorded implementation verification (2026-11-04)
 
-The final implementation passed all 21 gate invocations below on Linux
+The trailing-zero implementation passed all 21 gate invocations below on Linux
 x86_64, each with exit 0. The Rust 1.99.1 and MSRV 1.98.0 full test runs each reported
 114 passed / 19 ignored without serde and 132 passed / 20 ignored with serde,
 with zero failures and seven passing doc tests in each run. The separate
@@ -694,8 +1043,9 @@ Other trusted assumptions:
 Not covered by Verus: the remaining `kernel` helpers, including `mul`,
 `div`, `quantize` and the multiple rounding paths; P=7 equality/ordering,
 P=34 equality and the Kani-only `cmp_mag`/`cmp_general` reference; the parsers
-and formatter; and the public types' methods and conversions, including both
-trailing-zero value methods and the widening `From` implementations. Their
+and formatter; and the public types' methods and conversions, including the
+binary floating-point conversions, both trailing-zero value methods and the
+widening `From` implementations. Their
 evidence is listed elsewhere here.
 
 ### Obligations without a direct machine proof
@@ -707,6 +1057,7 @@ retained evidence is not a substitute for a proof.
 
 | Family and exact required domain | What is unproven and why it is hard | Retained evidence |
 |---|---|---|
+| `to_f64`, `to_f32`, `from_f64`, `from_f32`: every canonical decimal value and every source binary bit pattern for all three widths | No direct machine proof covers exact expansion, buffer and limb bounds, one-rounding selection, carry, fitting, trim composition, core parser behavior, or signed-special mapping. Existing helper proofs do not prove these callers, and core source inspection is not a proof of every parser input. | [Binary floating-point conversion](#binary-floating-point-conversion): manual full-domain arguments, enumerated numerical premises and fixed-version source arguments; completed independent-reference, property, gate and stated exhaustive runs. No direct conversion machine proof is claimed. |
 | Composition of native general addition/subtraction with public dispatch: every canonical operand pair and result width, specials and all three modes | The native finite computation itself is proved above. Its public callers still must establish finite canonical inputs and select the appropriate format; the compile-time assertions prove the eight-width selection, but not runtime extraction, special handling, encoding or public overflow mapping. The public type methods and the common general-kernel selector are not verified by Verus. | The sealed operand implementations and selection assertions, canonical-storage proofs, `addsub_all_27_coefficient_gap_sign_classes`, general exact/compression boundary tests and independent BigInt differentials. These do not constitute dedicated coverage of every narrow-only boundary; see the explicit coverage limitation below. |
 | Special-value dispatch and results: all canonical operands, width combinations, modes, quantize targets, multiple steps and parsing/formatting inputs | Public class dispatch, NaN selection/quieting/payload fitting, invalid-operation results, zero-divisor results, directed overflow mapping, total comparison and OrderedDecimal key semantics have no full-domain direct proof. Kani covers special storage, constants and widening/narrowing back only; the finite Verus proofs assume their finite preconditions. | The Infinity and NaN source argument, every test in `src/special_tests.rs`, special branches of the four Decimal32 exhaustive tests, and the independent finite differentials. |
 | Caller preconditions of the representation rows: every call from production code that Verus does not verify of `InRange::checked`, `InRange::unchecked`, `unpack_canonical_128`, `canonical`, `is_largest_finite` and `exceeds_max` | Unproven: `checked`, `unchecked`, `is_largest_finite` and `exceeds_max` need `W` to be one of the three formats; `unchecked` also needs the value in range; `unpack_canonical_128` needs a finite canonical encoding; `canonical` needs `c<2^127` and `q<=2^31-39`; `exceeds_max` needs `c<=10^P-1`. The callers (the public types' constants and methods, including both trailing-zero value methods, `mul`, `quantize`, the multiple rounding paths and the parsers `parse_32`, `parse_64`, `parse_chunks` and `parse_general`) are not verified. | `Width` is sealed and implemented only by the three formats; finite storage comes from validated finite bits or `encode`; special storage is classified before finite extraction; the value-range argument recorded at each caller; the Kani harnesses and tests that exercise those callers. |
@@ -1774,8 +2125,9 @@ propagated. No library formatting path allocates.
 
 All tests use the optimized test profile with integer overflow checks enabled.
 Each test runs on one thread, so the test harness's `--test-threads` setting
-bounds the cores a run occupies. Without the optional serde feature, nineteen
-tests are ignored by default and run with `cargo test -- --ignored`: the five
+bounds the cores a run occupies. The recorded trailing-zero implementation,
+before binary conversion additions, has nineteen tests ignored by default
+without serde, selected with `cargo test -- --ignored`: the five
 existing Decimal32 exhaustive tests (`decimal32_exhaustive_reference`,
 `decimal32_exhaustive_widening_reference`, `quantize_decimal32_exhaustive_reference`,
 `decimal32_exhaustive_format_parse_round_trip` and
@@ -1786,10 +2138,13 @@ and `div_every_coefficient_class_pair`. The serde feature adds the ignored
 100-million-input SWAR test described in Serialization. The other tests run
 with `cargo test` (the serde tests with `cargo test --features serde`), including
 the ten-million-input structured and widening tests and the million-input kernel division
-tests.
+tests. Binary conversion's additional ignored tests and their execution
+status are recorded separately in its section above; the earlier counts do
+not establish coverage of the new methods.
 
 | Operation | Test and coverage |
 |---|---|
+| Binary floating-point conversion | Independent exact-rational checks passed for all 12 method/width groups, fixed cases, full exponent/boundary cohorts, at least 10,000 fixed-seed inputs per group, signed-special/payload boundaries, round-trip and monotonicity properties. Full raw Decimal32-to-binary enumeration and composite full binary32-input coverage are recorded in the conversion section above; no exhaustive binary64 claim |
 | Decimal32 decoding/encoding | `decimal32_exhaustive_reference`: all 4,294,967,296 patterns; 3,840,000,000 finite, 186,531,840 noncanonical, 134,217,728 infinity, 134,217,728 NaN; accepted fields, bit identity, and rejection errors checked |
 | Decimal64/Decimal128 decoding/encoding | `decimal64_structured_splitmix64_reference`, `decimal128_structured_splitmix64_reference`: 10,000,000 structured patterns each; `all_exponents_signs_and_coefficient_boundaries`: every exponent, both signs, both steering forms, binary/decimal boundaries; `structured_in_range_encode_decode`: 100,000 generated field tuples per width |
 | Decimal32 widening | `decimal32_exhaustive_widening_reference`: every 32-bit pattern; every accepted finite value widened to both widths retains sign, coefficient, exponent under reference decoding; canonical specials are checked against independently constructed widened bits, quieting NaNs; rejected patterns remain invalid input |

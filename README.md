@@ -4,9 +4,10 @@ Fixed-width IEEE 754-2019 decimal types in pure Rust.
 
 - `Decimal32`, `Decimal64`, and `Decimal128`, stored in exactly 4, 8, and 16
   bytes (BID encoding).
-- Every operation returns the exact result, a result rounded in the direction
-  you specify, an IEEE 754-2019 infinity or NaN result, or an error. Nothing is
-  rounded or overflowed silently.
+- Arithmetic returns the exact result, a result rounded in the direction you
+  specify, an IEEE 754-2019 infinity or NaN result, or an error. Explicit
+  binary floating-point conversions use a fixed nearest, ties-to-even rule,
+  with documented precision and range limits.
 - As for `f64`, infinities and quiet and signaling NaNs are values, without
   IEEE 754-2019 status flags, and comparison is the IEEE comparison, under
   which a NaN is unordered. `OrderedDecimal` gives `Eq`, `Ord`, and `Hash` for
@@ -47,12 +48,13 @@ The feature keeps `no_std` and does not require allocation.
 
 ## Operations
 
-Methods without a direction return the exact result or an error; `_rounded`
-methods take a `Rounding` (`TowardNegative` or `TowardPositive`) and round
-once, and their overflow gives the IEEE 754-2019 result for that direction (an
-infinity or the largest finite value). There is no default rounding. Infinity
-and NaN operands give the IEEE 754-2019 results, and so does division by
-zero: `1 / 0` is an infinity and `0 / 0` is NaN; see
+Except for the explicit binary floating-point conversions below, methods
+without a direction return the exact result or an error; `_rounded` methods
+take a `Rounding` (`TowardNegative` or `TowardPositive`) and round once, and
+their overflow gives the IEEE 754-2019 result for that direction (an infinity
+or the largest finite value). There is no other default rounding. Decimal
+arithmetic gives the IEEE 754-2019 results for infinity and NaN operands and
+for division by zero: `1 / 0` is an infinity and `0 / 0` is NaN; see
 [docs/SPEC.md](docs/SPEC.md#infinity-and-nan).
 
 | Operation | Method | Result type | Direction argument |
@@ -66,6 +68,10 @@ zero: `1 / 0` is an infinity and `0 / 0` is NaN; see
 | Sign | `-x`, `x.abs()`, `x.copysign(y)`; `is_sign_negative`, `is_sign_positive` | Same as `x` / `bool` | None; always exact |
 | Widening | `From` | Wider type | None; always exact (a NaN becomes quiet) |
 | Narrowing | `TryFrom`, `Decimal32::from_d64_rounded`, `Decimal32::from_d128_rounded`, `Decimal64::from_d128_rounded` | Narrower type | Without / with |
+| Conversion to binary64 | `x.to_f64()` | `f64` | None; nearest, ties to even |
+| Conversion to binary32 | `x.to_f32()` | `f32` | None; nearest, ties to even |
+| Conversion from binary64 | `T::from_f64(value)` | `T`, returned directly | None; nearest, ties to even; 7 / 15 / 15 digits |
+| Conversion from binary32 | `T::from_f32(value)` | `T`, returned directly | None; nearest, ties to even; 6 digits |
 | Components | `coefficient()`, `mantissa()` (alias), `exponent()`, `scale()` (= −exponent); finite values only | `Result<i32/i64/i128>` / `Result<i32>` | None |
 | Coefficient and exponent | `T::from_coefficient_and_exponent(coefficient, exponent)`, `_rounded` variant, `x.to_coefficient_and_exponent()` | `T` / `(i32/i64/i128, i32)` | Without / with for construction |
 | Mantissa and scale | `T::from_mantissa_and_scale(mantissa, scale)`, `T::from_mantissa_and_scale_rounded(mantissa, scale, dir)`, `x.to_mantissa_and_scale()`; value = integer × 10^(−scale) | `T` / `(i32/i64/i128, i32)` | Without / with for construction |
@@ -78,6 +84,24 @@ zero: `1 / 0` is an infinity and `0 / 0` is NaN; see
 | Classification | `is_nan`, `is_infinite`, `is_finite`, `classify`; constants `NAN`, `INFINITY`, `NEG_INFINITY` | `bool` / `FpCategory` | None |
 | Encoding | `x.to_bits()`, `T::from_bits(bits)` | `u32`/`u64`/`u128` / `T` | None |
 
+The four binary conversion methods are inherent methods on every decimal
+width. `to_f64` and `to_f32` round the exact decimal value once to the named
+binary format; `to_f32` never goes through f64. `from_f64` rounds the exact
+binary value once to `min(P, 15)` significant digits, and `from_f32` to
+`min(P, 6)`, then applies `trim_fraction_zeros`. For example,
+`Decimal64::from_f64(0.1 + 0.2)` is `0.3`, and `from_f32(0.1)` is `0.1` in
+all three widths. These methods return values without `Result`, `Option`,
+status flags, or conversion-trait implementations.
+
+Rounded overflow gives signed infinity; underflow gives a subnormal or signed
+zero. Binary-to-decimal zeros have exponent zero. NaNs retain their sign,
+become quiet, and retain their integer payload only if it fits. Binary
+subnormals use the same digit rule and can retain expansion noise:
+`Decimal64::from_f64(5e-324)` has value `4.94065645841247E-324`.
+See the [binary conversion contract](docs/SPEC.md#binary-floating-point-conversion)
+for range, payload, cohort and round-trip limits. Exact parsing, decimal
+arithmetic and width conversion are unchanged; serde still rejects floats.
+
 Both trailing-zero methods return a decimal value, unlike the `stripped()`
 formatting adapter. For `1500`, `trim_fraction_zeros()` keeps coefficient 1500
 and exponent 0; `strip_trailing_zeros()` returns coefficient 15 and exponent 2.
@@ -88,10 +112,15 @@ for signed zeros, NaNs, and cohort changes.
 
 ## Status
 
-Every supported operation is implemented. Correctness evidence combines the
-integer arguments, exhaustive Decimal32 checks, independent
-arbitrary-precision tests, and the infinity and NaN tests described in
-[VERIFICATION.md](docs/VERIFICATION.md).
+Binary floating-point conversion has completed independent-reference,
+fixed-seed and boundary-class tests, exhaustive Decimal32 output checks,
+and full binary32 input coverage. Its integer arguments and checked premises,
+fixed-version core parser dependency, and verification limits are recorded in
+[VERIFICATION.md](docs/VERIFICATION.md#binary-floating-point-conversion).
+The existing operations' evidence combines integer arguments, exhaustive
+Decimal32 checks, independent arbitrary-precision tests, and special-value
+coverage described in the same document. Direct machine verification remains
+incomplete and is not implied by these results.
 The trailing-zero methods also have a full-domain integer argument, independent
 generated tests, and a completed exhaustive check of every canonical
 Decimal32 input; the exact scope and recorded results are listed there.
@@ -102,8 +131,8 @@ the obligations without a direct machine proof are listed separately there.
 
 | SPEC item | Status | Evidence |
 |---|---|---|
-| Goal 1: exact or explicit | Met | [VERIFICATION.md](docs/VERIFICATION.md): Integer obligations, Class coverage argument, Infinity and NaN |
-| Goal 2: proven correct | Met | [VERIFICATION.md](docs/VERIFICATION.md): Integer obligations, Exhaustive and differential evidence, Class coverage argument, Infinity and NaN |
+| Goal 1: exact or explicit | Met under the documented contract and verification limits | [VERIFICATION.md](docs/VERIFICATION.md): Integer obligations, Class coverage argument, Infinity and NaN |
+| Goal 2: proven correct | Met under the documented contract and verification limits | [VERIFICATION.md](docs/VERIFICATION.md): Integer obligations, Exhaustive and differential evidence, Class coverage argument, Infinity and NaN |
 | Goal 3: compact | Met | Compile-time size assertion for each type in `src/types.rs` |
 | Goal 4: pure Rust | Met | Only optional `serde` in `[dependencies]`, without default features; `#![no_std]` and `forbid(unsafe_code)` in `src/lib.rs` for every normal build (it is lifted only under the Verus verification cfg, see `docs/VERIFICATION.md`) |
 | Addition and subtraction | Met | [VERIFICATION.md](docs/VERIFICATION.md): Bounded-gap exact sum, Exact addition and subtraction, Compressed addition and subtraction |
@@ -114,14 +143,16 @@ the obligations without a direct machine proof are listed separately there.
 | Sign operations | Met | [VERIFICATION.md](docs/VERIFICATION.md): Sign operations |
 | Trailing-zero value transformations | Met | [VERIFICATION.md](docs/VERIFICATION.md#trailing-zero-value-transformations): contract, integer argument, independent-reference and exhaustive checks |
 | Comparison | Met | [VERIFICATION.md](docs/VERIFICATION.md): Numeric comparison, equality and canonical hashing; Infinity and NaN |
-| Infinity and NaN | Met | [VERIFICATION.md](docs/VERIFICATION.md): Infinity and NaN |
+| Infinity and NaN | Met | [VERIFICATION.md](docs/VERIFICATION.md): Infinity and NaN; binary conversion signed-special and payload-fit reference tests |
+| Binary floating-point conversion | Integer arguments, reference tests and stated exhaustive domains checked | [VERIFICATION.md](docs/VERIFICATION.md#binary-floating-point-conversion): manual bounds and checked premises, fixed-version core parser contract, independent-reference and exhaustive results |
+| Binary conversion NaN mapping | Signed-special and payload-fit checks passed | [VERIFICATION.md](docs/VERIFICATION.md#binary-floating-point-conversion): signed quiet NaNs, payload fit and bit-transport limits |
 | Width conversion | Met | [VERIFICATION.md](docs/VERIFICATION.md): Fitting a coefficient; widening and narrowing rows of Exhaustive and differential evidence |
 | Parsing | Met | [VERIFICATION.md](docs/VERIFICATION.md): String parsing |
 | Formatting | Met | [VERIFICATION.md](docs/VERIFICATION.md): Plain notation formatting, Decimal32 exhaustive format/parse round trip |
-| Verification 1: integer routine proofs | Met | [VERIFICATION.md](docs/VERIFICATION.md): Integer obligations |
-| Verification 2: exhaustive Decimal32 enumeration | Met | [VERIFICATION.md](docs/VERIFICATION.md): Exhaustive and differential evidence, Decimal32 exhaustive format/parse round trip, Decimal32 exhaustive quantize reference |
-| Verification 3: differential testing | Met | [VERIFICATION.md](docs/VERIFICATION.md): Scope and domains, Exhaustive and differential evidence |
-| Verification 4: class enumeration and coverage argument | Met | [VERIFICATION.md](docs/VERIFICATION.md): Class coverage argument, Infinity and NaN |
+| Verification 1: integer routine proofs | Manual full-domain arguments with checked numerical premises; no direct conversion machine proof | [VERIFICATION.md](docs/VERIFICATION.md#checked-integer-argument-premises): finite enumeration of expansion, limb/carry, rounding-index, format and text-capacity bounds; Integer obligations for existing helpers |
+| Verification 2: exhaustive Decimal32 enumeration | Recorded full-domain checks passed | [VERIFICATION.md](docs/VERIFICATION.md#binary-floating-point-conversion): all raw Decimal32 patterns, independent rejection checks and both binary destinations; existing decoding, widening, format/parse and quantize records below |
+| Verification 3: differential testing | Passed in the recorded domains | [VERIFICATION.md](docs/VERIFICATION.md#independent-reference-and-class-coverage-obligations): independent BigUint rational oracle, 10,000 seeded cases per method/width group and exhaustive Decimal32/binary32 domains |
+| Verification 4: class enumeration and coverage argument | Boundary, cohort, signed-special and error-path arguments and tests recorded | [VERIFICATION.md](docs/VERIFICATION.md#independent-reference-and-class-coverage-obligations): class partition, source-range and rounding arguments; existing Class coverage argument and Infinity and NaN sections |
 
 ## Benchmarks
 

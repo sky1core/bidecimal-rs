@@ -33,6 +33,10 @@ trait Operate: Number + fmt::Display {
     fn multiple_floor(self, step: Self) -> Result<Self, Error>;
     fn trimmed(self) -> Self;
     fn stripped_value(self) -> Self;
+    fn binary64(self) -> f64;
+    fn binary32(self) -> f32;
+    fn of_binary64(value: f64) -> Self;
+    fn of_binary32(value: f32) -> Self;
     fn total_order(&self, other: &Self) -> Ordering;
 }
 macro_rules! operate {
@@ -58,6 +62,10 @@ macro_rules! operate {
             }
             fn trimmed(self) -> Self { self.trim_fraction_zeros() }
             fn stripped_value(self) -> Self { self.strip_trailing_zeros() }
+            fn binary64(self) -> f64 { self.to_f64() }
+            fn binary32(self) -> f32 { self.to_f32() }
+            fn of_binary64(value: f64) -> Self { Self::from_f64(value) }
+            fn of_binary32(value: f32) -> Self { Self::from_f32(value) }
             fn total_order(&self, other: &Self) -> Ordering { self.total_cmp(other) }
         }
     )*};
@@ -567,6 +575,44 @@ fn trailing_zero_methods<T: Operate>(c: &mut Criterion) {
     );
 }
 
+// These common finite inputs exercise the four new rows without consuming
+// the existing workloads' RNG. Independent numerical oracles live in tests.
+fn binary_methods<T: Operate>(c: &mut Criterion) {
+    let cases = [
+        ("0", 0.0_f64, 0.0_f32),
+        ("-0", -0.0_f64, -0.0_f32),
+        ("0.1", 0.1_f64, 0.1_f32),
+        ("0.125", 0.125_f64, 0.125_f32),
+        ("1.5", 1.5_f64, 1.5_f32),
+        ("-2.25", -2.25_f64, -2.25_f32),
+        ("86.296", 86.296_f64, 86.296_f32),
+        ("123456", 123456.0_f64, 123456.0_f32),
+    ];
+    let decimals: Vec<T> = (0..COUNT)
+        .map(|i| T::parse(cases[i % cases.len()].0))
+        .collect();
+    let binary64: Vec<f64> = (0..COUNT).map(|i| cases[i % cases.len()].1).collect();
+    let binary32: Vec<f32> = (0..COUNT).map(|i| cases[i % cases.len()].2).collect();
+    for ((&decimal, &double), &single) in decimals.iter().zip(&binary64).zip(&binary32) {
+        assert_eq!(decimal.binary64().to_bits(), double.to_bits());
+        assert_eq!(decimal.binary32().to_bits(), single.to_bits());
+        assert_eq!(T::of_binary64(double).bits(), decimal.trimmed().bits());
+        assert_eq!(T::of_binary32(single).bits(), decimal.trimmed().bits());
+    }
+    per_element(c, &format!("to_f64_{}", T::NAME), &decimals, |&x| {
+        x.binary64()
+    });
+    per_element(c, &format!("to_f32_{}", T::NAME), &decimals, |&x| {
+        x.binary32()
+    });
+    per_element(c, &format!("from_f64_{}", T::NAME), &binary64, |&x| {
+        T::of_binary64(x)
+    });
+    per_element(c, &format!("from_f32_{}", T::NAME), &binary32, |&x| {
+        T::of_binary32(x)
+    });
+}
+
 fn width<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     parsing::<T>(c, rng);
     formatting::<T>(c, rng);
@@ -576,6 +622,7 @@ fn width<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     multiple::<T>(c, rng);
     comparison::<T>(c, rng);
     trailing_zero_methods::<T>(c);
+    binary_methods::<T>(c);
 }
 
 fn ops(c: &mut Criterion) {

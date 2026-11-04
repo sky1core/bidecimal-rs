@@ -11,23 +11,27 @@
 //! width. Every finite value is supported: zeros of either sign and every
 //! representation (cohort member) of every finite number. So are both
 //! infinities and quiet and signaling NaNs, with the IEEE 754-2019 results
-//! for operations on them and no status flags.
+//! for decimal operations on them and no status flags. Binary conversions
+//! use their separately documented project NaN bit policy.
 //! [`OrderedDecimal`] gives `Eq`, `Ord`, and `Hash` for use as a key, as
 //! `OrderedFloat` does for `f64`.
 //!
 //! # Results
 //!
-//! Every operation returns the exact result, a result rounded in a direction
-//! the caller named, an IEEE 754-2019 infinity or NaN, or an [`Error`]. There
-//! is no default rounding. Division by zero gives an infinity, or NaN for
-//! `0 / 0`, also with finite operands.
+//! Apart from the explicit binary floating-point conversions, every operation
+//! returns the exact result, a result rounded in a direction the caller named,
+//! an IEEE 754-2019 infinity or NaN, or an [`Error`], without default rounding.
+//! Division by zero gives an infinity, or NaN for `0 / 0`, also with finite
+//! operands. The binary conversions instead use their fixed nearest-even
+//! contract and return values without errors or status flags.
 //!
 //! - Addition, subtraction, multiplication, division, narrowing conversion,
 //!   and parsing have a form without a direction and a `_rounded` form that
 //!   takes a [`Rounding`].
-//! - Without a direction, a result whose exact magnitude exceeds the largest
-//!   finite value of the result type is [`Error::Overflow`]; any other result
-//!   that is not exactly representable is [`Error::Inexact`].
+//! - For those arithmetic, narrowing and parsing operations, without a
+//!   direction a result whose exact magnitude exceeds the largest finite
+//!   value is [`Error::Overflow`]; any other nonrepresentable result is
+//!   [`Error::Inexact`].
 //! - With a direction, a result that is not exactly representable is rounded
 //!   once in that direction and uses the least possible exponent. When the
 //!   result, rounded in that direction as if the exponent range were
@@ -37,11 +41,19 @@
 //! - Quantize and rounding to a multiple always take a [`Rounding`] and round
 //!   once in that direction. Their result exponent and errors are documented
 //!   on each method.
+//! - The inherent `to_f64`/`to_f32` methods round the exact decimal value
+//!   directly to the target binary format, nearest with ties to even.
+//!   `from_f64`/`from_f32` round the exact binary value once to at most
+//!   `min(Self::DIGITS, 15)`/`min(Self::DIGITS, 6)` significant decimal digits
+//!   and then remove fractional trailing zeros. Overflow gives signed
+//!   infinity; underflow is gradual or signed zero. Binary-to-decimal zero
+//!   has exponent zero. These methods do not change other operations.
 //! - An exact result uses the preferred exponent of the operation, or the
 //!   representable exponent closest to it.
 //! - The sign of a zero result follows IEEE 754-2019; where that sign depends
 //!   on the rounding direction, a call without a direction gives +0.
-//! - No operation panics; failures are reported through [`Result`].
+//! - No operation panics; failures of fallible operations are reported
+//!   through [`Result`].
 //!
 //! # Features
 //!
@@ -81,6 +93,7 @@
 #[allow(unused_imports)]
 use vstd::prelude::*;
 
+mod binary;
 mod display;
 mod error;
 mod kernel;
@@ -146,3 +159,6 @@ mod special_tests;
 mod test_support;
 #[cfg(test)]
 mod trailing_zero_tests;
+
+#[cfg(test)]
+mod binary_float_tests;

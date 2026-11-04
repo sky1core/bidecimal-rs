@@ -8,14 +8,18 @@ they disagree, the code is wrong.
 bidecimal provides fixed-width IEEE 754-2019 decimal types — `Decimal32`,
 `Decimal64`, and `Decimal128` — whose operations return an exact result, a
 single rounding in a direction the caller names, an IEEE 754-2019 infinity or
-NaN result, or an error.
+NaN result, or an error. The explicit binary floating-point conversions are
+the narrow exception: they use the fixed nearest, ties-to-even rule and
+precision limits specified below.
 
 The project succeeds when all of the following hold:
 
 1. **Exact or explicit.** Every supported operation returns the exact result,
    a result rounded in a direction the caller named, the infinity or NaN result
-   defined below, or an error. Nothing is rounded, truncated, or overflowed
-   silently.
+   defined below, or an error. The explicitly named binary floating-point
+   conversions instead use the fixed nearest, ties-to-even contract below,
+   including its precision limits, overflow and underflow results. No other
+   operation silently rounds, truncates, or overflows.
 2. **Proven correct.** Correctness is backed by evidence that covers every
    supported input. A count of passing tests is not that evidence, and neither
    is having ported another implementation such as Intel BID or IBM decNumber.
@@ -63,15 +67,22 @@ Items 1–7 concern finite operands; infinity and NaN operands follow
 [Infinity and NaN](#infinity-and-nan).
 
 1. If the exact result is representable in the result type, the operation
-   returns it.
-2. Otherwise the operation rounds in the direction the caller specified or
-   returns an error. There is no default rounding. Addition, subtraction,
-   multiplication, division, narrowing conversion, and parsing can each be
-   called without a direction (an unrepresentable result is an error) or with
-   one (the result is rounded). Quantize and rounding to a multiple always
-   take a direction.
-3. The rounding directions are roundTowardNegative and roundTowardPositive.
-4. Without a direction, overflow is an error: the exact result exceeds the
+   returns it, except that binary-to-decimal conversion applies its explicitly
+   limited significant-digit precision even when the full decimal format
+   could represent more digits exactly.
+2. Except for the explicit binary floating-point conversions below, an
+   unrepresentable result is rounded in the direction the caller specified or
+   returns an error. Those operations have no default rounding. Addition,
+   subtraction, multiplication, division, narrowing conversion, and parsing
+   can each be called without a direction (an unrepresentable result is an
+   error) or with one (the result is rounded). Quantize and rounding to a
+   multiple always take a direction. The binary conversion rule does not
+   change any of these operations.
+3. The caller-selectable rounding directions are roundTowardNegative and
+   roundTowardPositive. Binary floating-point conversion uses fixed
+   roundTiesToEven; this adds no variant to `Rounding`.
+4. For operations other than the binary floating-point conversions below,
+   without a direction, overflow is an error: the exact result exceeds the
    largest finite value of the result type in magnitude. With a direction,
    overflow is determined as in IEEE 754-2019 — the result, rounded in that
    direction as if the exponent range were unbounded, exceeds the largest
@@ -79,30 +90,40 @@ Items 1–7 concern finite operands; infinity and NaN operands follow
    result: toward positive, +∞ for a positive result and the most negative
    finite value for a negative one; toward negative, the largest finite value
    for a positive result and −∞ for a negative one. Rounding to a multiple is
-   the exception: its overflow is an error in either direction.
-5. No operation panics, aborts, or wraps. Failures are reported through
-   `Result`, and errors distinguish at least: not exactly representable,
-   overflow, division by zero, and invalid input.
-6. The exponent of a result follows IEEE 754-2019: an exact result uses the
-   preferred exponent of the operation, or the representable exponent closest
-   to it; a rounded result uses the least possible exponent.
+   the exception: its overflow is an error in either direction. Binary
+   floating-point conversion uses its specified nearest-even overflow and
+   gradual-underflow mapping, returning a value.
+5. No operation panics, aborts, or wraps. Failures of fallible operations are
+   reported through `Result`, and errors distinguish at least: not exactly
+   representable, overflow, division by zero, and invalid input. The binary
+   floating-point conversions are total over valid source values and return
+   the specified values, without `Result`, `Option`, or status flags.
+6. Except for the binary-to-decimal cohort policy below, the exponent of a
+   result follows IEEE 754-2019: an exact result uses the preferred exponent
+   of the operation, or the representable exponent closest to it; a rounded
+   result uses the least possible exponent. The exact trailing-zero value
+   transformations retain their separate exponent rules below.
 7. The sign of a zero result follows IEEE 754-2019. Where IEEE 754-2019 makes
    that sign depend on the rounding direction, an operation called without a
-   direction gives +0.
+   direction gives +0. Binary floating-point conversion preserves the source
+   sign, also on underflow to zero; a binary-to-decimal zero has exponent zero.
 
 ## Infinity and NaN
 
 - Operations give the IEEE 754-2019 results for infinity and NaN operands, as
-  listed for each operation below. Only the values are provided: the IEEE
-  754-2019 status flags are not.
-- A NaN operand gives a quiet NaN with the sign and payload of the first NaN
+  listed for each operation below. Binary floating-point conversion has its
+  separate sign, quieting and payload mapping below. Only the values are
+  provided: the IEEE 754-2019 status flags are not.
+- Except for the separate binary floating-point conversion mapping, a NaN
+  operand gives a quiet NaN with the sign and payload of the first NaN
   operand. A payload that is not below 10^(P−1) for the result type becomes
   zero. A signaling NaN operand gives a quiet NaN like a quiet one; only the
   sign operations and decoding bits keep a signaling NaN.
 - An invalid operation gives the positive quiet NaN with payload zero:
   `∞ − ∞` for infinities of the same sign (and `+∞ + −∞`), `0 × ∞`, `0 ÷ 0`,
   `∞ ÷ ∞`, and the cases listed under each operation.
-- An operation without a direction whose finite result is not representable
+- Except for the explicitly named binary floating-point conversions, an
+  operation without a direction whose finite result is not representable
   returns an error, never an infinity or NaN.
 
 ## Operations
@@ -227,6 +248,112 @@ result = step × to_integer(x / step), returned in the type of x and step
   largest finite value is an overflow error; any other value that needs more
   digits or a smaller exponent than the target provides is a
   not-exactly-representable error.
+
+### Binary floating-point conversion
+
+Each of `Decimal32`, `Decimal64`, and `Decimal128` provides four inherent
+methods:
+
+```text
+to_f64(self) -> f64
+to_f32(self) -> f32
+from_f64(value: f64) -> Self
+from_f32(value: f32) -> Self
+```
+
+They return values, not `Result` or `Option`, and expose no status flags or
+rounding argument. They add no `From`, `Into`, `TryFrom`, or numeric-trait
+implementations. They are manually written safe Rust, require neither
+allocation nor a new dependency, and retain `no_std`. `to_f64` and `to_f32`
+pass exact decimal text to the core floating-point parser for binary rounding.
+
+For a finite decimal input, `to_f64` and `to_f32` round the exact value
+`sign * coefficient * 10^exponent` once to the destination binary format,
+nearest with ties to an even significand. `to_f32` rounds directly to binary32,
+not through binary64. For example, decimal
+`1.000000059604644775390625000000001` converts directly to f32 bits
+`0x3f800001`; first rounding it to f64 and then to f32 would give `0x3f800000`.
+Equal finite decimal cohorts have the same binary result.
+
+For a finite binary input, `from_f64` and `from_f32` start from its exact
+binary rational value, not its shortest printed decimal spelling. They round
+once, nearest with ties to an even retained decimal coefficient, to the
+following significant-digit limits:
+
+| Destination | `from_f64`: min(P, 15) | `from_f32`: min(P, 6) |
+|---|---|---|
+| `Decimal32` | 7 | 6 |
+| `Decimal64` | 15 | 6 |
+| `Decimal128` | 15 | 6 |
+
+Here P is the destination's full precision, and 15 and 6 are `f64::DIGITS`
+and `f32::DIGITS`. The destination's minimum exponent participates in this
+same rounding; rounding to the digit limit and then rounding again for
+underflow is not allowed. A larger decimal destination does not retain
+additional binary expansion digits beyond this limit.
+
+The binary-to-decimal cohort rule is a project rule. For a nonzero finite
+input, form its exact terminating decimal expansion `c * 10^q`, using `q=0`
+for an integer and otherwise the greatest `q<0` for which `c` is an integer.
+If `c` has L digits and the significant-digit limit is K, discard
+`max(L-K, qmin-q, 0)` decimal places and round once. A carry beyond K digits
+is absorbed by an exact division by ten and an exponent increment. An
+exponent above `qmax` is fitted by exact coefficient zero padding if the
+full destination precision P permits; otherwise the result overflows.
+Finally apply the existing `trim_fraction_zeros` rule to the finite result.
+It removes only fractional trailing zeros, not integer zeros at exponent zero
+or coefficient zeros at a positive exponent. Every zero result has exponent
+zero and retains the input sign, including a nonzero input rounded to zero.
+This policy does not change the standalone trailing-zero methods.
+
+Range is decided from the rounded result. Rounded overflow produces infinity
+with the source sign. Gradual underflow produces a subnormal or a zero with
+the source sign; exactly half the smallest positive destination value rounds
+to zero. A finite source just beyond the destination's largest finite value
+may still round to that value. Among binary-to-decimal conversions, only
+`Decimal32::from_f64` can overflow or underflow the decimal range; Decimal64
+and Decimal128 cover the finite binary64 range, and all three decimal widths
+cover the finite binary32 range.
+
+Both directions preserve the sign of zero and infinity. Every NaN becomes a
+quiet NaN with the source sign. Treat the payload as an unsigned integer,
+excluding the quiet/signaling discriminator: preserve it if it fits the
+destination, otherwise use zero. The decimal limit is `payload < 10^(P-1)`;
+the binary limits are `payload < 2^22` for f32 and `payload < 2^51` for f64.
+This is a project mapping, not an IEEE cross-radix payload requirement. The
+binary mapping uses the IEEE-2008 interchange quiet-bit convention: fraction
+bit 22 for f32 or bit 51 for f64 is set. Rust documents this interpretation
+for x86 and ARM and a historical signaling-polarity difference on MIPS;
+bit transport does not assert identical hardware signaling behavior on
+every target. No floating-point arithmetic is used to transport NaN fields.
+
+Examples below state numerical results, not `Display` notation or a promise
+to recover the source's original spelling:
+
+| Binary input | Decimal result |
+|---|---|
+| `0.1_f64` | Decimal64 and Decimal128: `0.1` |
+| `0.1_f64 + 0.2_f64` | Decimal64 and Decimal128: `0.3` |
+| `86.296_f64` | Decimal64 and Decimal128: `86.296` |
+| `1e20_f64` | Decimal64 and Decimal128: `1E+20` |
+| `1.2345678901234568e17_f64` | Decimal64 and Decimal128: `1.23456789012346E+17` |
+| `5e-324_f64` (the smallest positive f64 subnormal) | Decimal64 and Decimal128: `4.94065645841247E-324`; Decimal32: positive zero |
+| `0.1_f32` | All three decimal widths: `0.1` |
+
+The same digit rule applies to binary subnormals. Their available relative
+precision is lower than in the normal range, so expansion noise can remain,
+as the smallest f64 example shows. General binary-to-decimal-to-binary
+bitwise round trips are not promised. Decimal-to-binary-to-decimal numerical
+round trips apply to at most 15 significant digits for Decimal64/Decimal128
+through f64, seven for Decimal32 through f64, and six for every width through
+f32, within the common normal finite range. This is a numerical guarantee,
+not preservation of the original decimal cohort. Zero sign is preserved
+separately.
+
+Arithmetic, parsing, quantize, decimal-width conversion, serialization, and
+the trailing-zero value transformations retain their existing contracts.
+In particular, serde continues to reject floating-point inputs. These methods
+are the explicitly named interoperability path, not implicit conversion.
 
 ### Coefficient, exponent, mantissa, and scale
 
@@ -401,7 +528,9 @@ A reduced sample is a preliminary observation, not evidence.
 ## Non-goals
 
 - IEEE 754-2019 status flags and alternate exception handling.
-- Rounding directions other than roundTowardNegative and roundTowardPositive.
+- Caller-selectable rounding directions other than roundTowardNegative and
+  roundTowardPositive, apart from the fixed nearest-even rule of binary
+  floating-point conversion.
 - General arbitrary-precision division and remainder.
 
 ## Implementation Requirements
