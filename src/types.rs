@@ -233,6 +233,13 @@ macro_rules! decimal_type {
                 })))
             }
 
+            /// The value of an in-range finite result, encoded without the
+            /// re-validation [`from_bits`](Self::from_bits) performs.
+            #[cfg(feature = "serde")]
+            pub(crate) fn from_in_range(v: InRange<$width>) -> Self {
+                Self(layout::$encode(v))
+            }
+
             /// The result of a finite operation whose sign would be `neg`:
             /// an overflow with a direction becomes the IEEE 754-2019
             /// infinity or largest finite value for that direction and sign.

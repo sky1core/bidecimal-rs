@@ -7,6 +7,8 @@ use serde_test::{
 use std::format;
 use std::string::ToString;
 
+use crate::format_tests::short_text_boundary;
+use crate::refbid::{self, Format};
 use crate::{Decimal32, Decimal64, Decimal128, OrderedDecimal};
 
 trait Bits: Copy {
@@ -210,6 +212,36 @@ macro_rules! serde_width_tests {
             }
 
             #[test]
+            fn readable_serializes_display_around_stack_text_limit() {
+                let format = match <$decimal>::DIGITS {
+                    7 => Format::D32,
+                    16 => Format::D64,
+                    _ => Format::D128,
+                };
+                let mut lengths = std::collections::BTreeSet::new();
+                for v in short_text_boundary(format) {
+                    let value = <$decimal>::from_bits(refbid::encode(v, format) as $bits).unwrap();
+                    let text: &'static str = value.to_string().leak();
+                    lengths.insert(text.len());
+                    assert_ser_tokens(&value.readable(), &[Token::Str(text)]);
+                    assert_ser_tokens(&OrderedDecimal(value).readable(), &[Token::Str(text)]);
+                    // The text reads back as the same number, at the
+                    // exponent its parse gives.
+                    let parsed = <$decimal>::parse(text).unwrap();
+                    assert_eq!(parsed, value);
+                    assert_de_tokens(&Bitwise(parsed).readable(), &[Token::Str(text)]);
+                }
+                // Both sides of the limit are covered wherever the width
+                // can produce text that long.
+                let limit = crate::display::TEXT_LEN;
+                if lengths.last().is_some_and(|&max| max > limit) {
+                    for len in [limit - 1, limit, limit + 1] {
+                        assert!(lengths.contains(&len), "{len}");
+                    }
+                }
+            }
+
+            #[test]
             fn readable_rejects_invalid_inexact_overflow_and_floats() {
                 for text in ["", "1.2.3", " 1", "sNaN", "NaN(1)", "1.2345678901234567890123456789012345", "1e99999"] {
                     let error = <$decimal>::parse(text).unwrap_err();
@@ -230,3 +262,39 @@ macro_rules! serde_width_tests {
 serde_width_tests!(decimal32, Decimal32, u32);
 serde_width_tests!(decimal64, Decimal64, u64);
 serde_width_tests!(decimal128, Decimal128, u128);
+
+#[test]
+fn serde_only_lane_public_boundaries() {
+    // Plain exact input spelling is the independently stated JSON string oracle.
+    for text in [
+        "0",
+        "-0",
+        "-0.00",
+        "123.4500",
+        "99999999",
+        "100000000",
+        "9999999999999999",
+        "10000000000000000",
+        "9223372036854775807",
+        "-9223372036854775808",
+        "18446744073709551615",
+        "18446744073709551616",
+        "1844674407370955161.5",
+        "1844674407370955161.6",
+    ] {
+        let value = Decimal128::parse(text).unwrap();
+        assert_ser_tokens(&value, &[Token::Str(text)]);
+    }
+    // serde_test tokens require static strings; retain all six boundary spellings.
+    for text in [
+        "0.000000000000000000000000000000000000000000001", // 44 leading fractional zeros
+        "-0.000000000000000000000000000000000000000000001", // 44 leading fractional zeros
+        "0.0000000000000000000000000000000000000000000001", // 45 leading fractional zeros
+        "-0.0000000000000000000000000000000000000000000001", // 45 leading fractional zeros
+        "0.00000000000000000000000000000000000000000000001", // 46 leading fractional zeros
+        "-0.00000000000000000000000000000000000000000000001", // 46 leading fractional zeros
+    ] {
+        let value = Decimal128::parse(text).unwrap();
+        assert_ser_tokens(&value, &[Token::Str(text)]);
+    }
+}

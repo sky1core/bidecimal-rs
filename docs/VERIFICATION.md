@@ -69,7 +69,7 @@ cargo test --locked --features serde
 To run only the Serde tests:
 
 ```sh
-cargo test --locked --features serde --lib serde_tests
+cargo test --locked --features serde --lib serde
 ```
 
 `src/serde_tests.rs` checks the public serde implementations for all three
@@ -80,6 +80,49 @@ and signed quiet/signaling NaNs with boundary payloads. A bitwise equality
 adapter keeps numeric equality from hiding cohort, zero-sign, or NaN-field
 changes. The 128-bit integer cases use serde's integer value deserializers.
 
+Serialization writes the `Display` text without flags as one string. Special
+values write `NaN`, `inf` or `-inf`. Finite values whose coefficient fits
+`u64` are first classified by `serde_support::lane`. For exponent `e >= 0`,
+the scaled magnitude `c * 10^e` must fit `u64`; a negative result must also
+fit `i64`, including `i64::MIN`. These integers use std `format_into`; a
+negative zero with `e >= 0`, which no integer type holds, is written `-0`.
+For `e < 0`, the fractional lane admits `-e <= 46` without a minus sign or
+`-e <= 45` with one, keeping the text within 48 bytes. It writes right-aligned
+8-digit blocks into a 48-byte buffer filled with ASCII `0` bytes. When the decimal
+point is inside the digits, a fixed 24-byte move makes room for it. The actual
+text is checked as UTF-8 once. The selected text is passed to `serialize_str`
+once. Failure to assemble an admitted value returns a serializer error,
+without retrying another path.
+
+Other finite values retain the `Parts` path. Their digits are written once
+into `Parts` (sign, digit string, exponent), the same pieces padded `Display`
+uses. A nonnegative value with exponent zero is its digits alone and is passed
+to `serialize_str` directly. Otherwise `text_len` gives the length, sign
+included, before anything is written. Text of at most `TEXT_LEN` (112) bytes is
+written by `Parts::write_text` (the sign, then `write_magnitude`) into a
+112-byte stack buffer, checked as UTF-8 once and passed to `serialize_str`;
+because the length was checked first the buffer cannot fill, and a write or
+UTF-8 failure is returned as a serializer error, not routed to another path.
+Longer text is streamed through `collect_str` from the same `Parts` and writer.
+The two lane tests, `serde_small_lane_direct_lengths_and_exponents` and
+`serde_small_lane_direct_integer_and_point_boundaries`, check eligibility and
+text boundaries; `serde_only_lane_public_boundaries` checks public serialization.
+The SWAR test `small_eight_all_100_million_match_format` is ignored by default;
+run it explicitly with:
+
+```sh
+cargo test --release --features serde -- --ignored small_eight_all_100_million_match_format
+```
+
+`readable_serializes_display_around_stack_text_limit` checks, for every width,
+that values whose text is 111, 112 and 113 bytes long, wherever the width
+reaches those lengths, serialize to their `Display` text, which `parse` reads
+back as the same number, and deserialize to the bits `parse` gives for that
+text; `format_short_text_boundary_matches_reference` checks the plain, stripped
+and padded `Display` text of the same values against an independent reference;
+`scripts/test_bench_ab.py` keeps the limit in `benches/serde.rs` equal to
+`TEXT_LEN`.
+
 Integer inputs are fitted directly from their sign and unsigned magnitude,
 with preferred exponent zero and no rounding direction. A coefficient already
 in range at exponent zero uses InRange::checked directly; larger coefficients
@@ -87,8 +130,11 @@ use fit. There is no integer
 formatting or reparsing. Magnitudes at or above 2^127 are divided by ten once,
 with a sticky remainder and exponent one. This places the coefficient below
 2^127 while any sticky coefficient is at least 10^33, satisfying the shared
-fit kernel's preconditions for every width. The resulting canonical encoding
-passes the public canonical-value validation boundary. This caller connection
+fit kernel's preconditions for every width. The result is an `InRange` value,
+whose invariant is `c<10^P` and `qmin<=q<=qmax` for the width, and
+`from_in_range` stores it with the width's encoder, the one finite operation
+results use, without the `from_bits` re-validation; the encoder gives the
+canonical encoding of any fields in that range. This caller connection
 is reviewed and tested, not a new complete formal proof of the serde wrapper.
 Tests compare values, representation bits, and error kinds with exact parsing
 at precision boundaries, signed/unsigned 64- and 128-bit endpoints, and 10,000
@@ -1508,15 +1554,20 @@ Before padding, the longest output is Decimal128 with c=1, q=-6176 and a
 negative sign: `1+2+6175+1=6179` bytes. Nonnegative-exponent output has at most
 `1+34+6111=6146` bytes. A point inside the digits needs at most `1+34+1=36`.
 Every smaller width is contained in these bounds. Stripping cannot increase
-length. The unsigned stack buffer has 6179 bytes, more than the maximum
-6178-byte magnitude. All slices/splits are checked; copied slices have equal
-length by construction. Zero blocks use lengths at most 64 and subtract at
-most the remaining count. No index, arithmetic, or UTF-8 conversion can panic.
+length. All slices/splits are checked. Zero blocks use lengths at most 64
+and subtract at most the remaining count. No index, arithmetic, or UTF-8
+conversion can panic.
 
-The normal path writes pieces directly through `fmt::Write`. Formatting flags
-use the bounded unsigned stack text and `pad_integral`; padding is streamed
-to the writer and is not limited by the stack capacity. Precision is ignored
-on both paths. Display and Debug share the same formatting implementation,
+Without formatting flags, `magnitude` writes the pieces directly through
+`fmt::Write`. With flags, the digits are written once into `Parts`; stripping
+there removes one trailing zero at a time while the exponent is negative, and
+a nonzero coefficient has a nonzero digit, so the digits never run out.
+`Parts::magnitude_len` gives the unsigned length and `Parts::write_magnitude`
+writes the same pieces in the same order as `magnitude`. `pad` then writes the
+sign, the fill and that body as `pad_integral` does: right-aligned by default,
+with the sign before zero padding. Everything is streamed to the writer, so no
+stack text is built and padding has no length limit. Precision is ignored on
+both paths. Display and Debug share the same formatting implementation,
 including on the private-field Stripped adapter. Every writer failure is
 propagated. No library formatting path allocates.
 
@@ -1560,7 +1611,7 @@ tests.
 | Parsing grammar | `parse_grammar_shapes_and_rejected_classes`: finite significand shapes, optional signs, both exponent markers/signs/leading zeros, invalid numeric syntax and malformed special spellings; FromStr agrees with parse for every width |
 | Parsing numeric/range | `parse_coefficient_exponent_sign_and_range_classes`, `parse_unbounded_digits_saturation_and_scale_clamps`: coefficient/exponent/sign/mode classes, accumulation and saturation boundaries, million-digit input; `parse_long_nonzero_significands_in_range`: nonzero significands of 3,002 to 100,000 significant digits, one with 3,000 interior zeros, within the Decimal128 range and including one near its minimum exponent |
 | Parsing fuzz | `parse_valid_and_invalid_grammar_fuzzer_ten_thousand_per_width_mode`: 10,000 valid plus 10,000 invalid per width, all modes; `parse_valid_and_invalid_grammar_fuzzer_million_per_width_mode`: 1,000,000 of each per width/mode, wall time |
-| Plain/stripped formatting | `format_all_coefficient_exponent_sign_classes_and_extreme_lengths`: full coefficient/exponent/sign classes and 6179-byte limit; `format_flags_precision_ignored_and_debug_equals_display`: width below/above length, space/star/Unicode fills, all alignments, sign/zero flags crossed with widths and precision; `format_writer_errors_propagate_on_direct_and_padded_paths`: writer failures |
+| Plain/stripped formatting | `format_all_coefficient_exponent_sign_classes_and_extreme_lengths`: full coefficient/exponent/sign classes and the longest 6179-byte text; `format_short_text_boundary_matches_reference`: plain, stripped and padded text of values 111 to 113 bytes long and of coefficients 0, 1, 7, 10, 12345, 10^(p-1), the maximum and, for Decimal128, `u64::MAX` and `u64::MAX + 1`, at every exponent from -116 to 116 the width allows and at the exponent limits and their neighbors, against an independent reference; `format_flags_precision_ignored_and_debug_equals_display`: width below/above length, space/star/Unicode fills, all alignments, sign/zero flags crossed with widths and precision; `format_writer_errors_propagate_on_direct_and_padded_paths`: writer failures |
 | Format/parse differential | `format_parse_random_two_thousand_per_width`: 2,000 independently generated values per width; `format_parse_million_per_width_independent_references`: 1,000,000 per width, plain/stripped strings against independent formatting and parsing in all modes, wall time |
 | Decimal32 format/parse | `decimal32_exhaustive_format_parse_round_trip`: every 32-bit pattern; finite plain and stripped via stack-backed fmt::Write; canonical special plain output reparsed for NaN/infinity class and infinity sign; finite fields and rejected patterns checked independently; wall time |
 | Range boundaries | `narrowing_largest_finite_and_underflow_boundaries`: both signs, maximum finite neighbors at four finer exponents, and underflow/carry/zero around `qmin`, in all three modes |
@@ -1665,7 +1716,7 @@ establish the result for all members of each following disjoint path class.
 | Parsing exact dispatch: no dropped digits, retained length <=P and preference in range; or the complement | The direct-result proof establishes equality of every field in all modes; the complementary path uses the complete fit contract | `parse_accumulator_chunk_and_exact_dispatch_boundaries` crosses coefficient capacity, all point positions at digit boundaries, both signs, exponent syntax and qmin/qmax neighbors |
 | Parsing: accepted/rejected grammar; zero/nonzero; retained length 0..35; dropped zero/nonzero; both exponent saturation signs and clamp boundaries | Finite byte grammar is exhaustive; accumulation recurrence and sticky lower bound cover every length and tail; monotone scale clamping preserves range, sign and preference rules | `parse_grammar_shapes_and_rejected_classes`, `parse_coefficient_exponent_sign_and_range_classes`, `parse_unbounded_digits_saturation_and_scale_clamps`, `parse_long_nonzero_significands_in_range`, parsing fuzz tests |
 | Formatting: q>=0/q<0; zero/nonzero; point inside/before digits; strip removes none/some/all fractional zeros | Each finite coefficient has a unique digit string and point position; bounded concatenation preserves exact value and exponent, with signed zero handled explicitly | `format_all_coefficient_exponent_sign_classes_and_extreme_lengths`, `format_parse_random_two_thousand_per_width`, `decimal32_exhaustive_format_parse_round_trip` |
-| Formatting flags absent/present; precision; writer success/failure | Direct writes and bounded stack construction produce identical magnitude; integral padding applies sign/width/alignment without rounding or allocation; errors propagate | `format_flags_precision_ignored_and_debug_equals_display`, `format_writer_errors_propagate_on_direct_and_padded_paths` |
+| Formatting flags absent/present; precision; writer success/failure | `magnitude` and `Parts::write_magnitude` write the same magnitude; padding applies sign/width/alignment as integer padding does, without rounding or allocation; errors propagate | `format_flags_precision_ignored_and_debug_equals_display`, `format_writer_errors_propagate_on_direct_and_padded_paths` |
 | Trailing-zero count 0..33; all zero representations | Exact power division gives a unique nonzero canonical tuple; zeros use a single tuple across widths | `cohort_hashes_cross_width_and_zero_signs`, `strip_trailing_zeros_matches_naive_for_every_power` |
 
 These finite partitions are exhaustive because every finite input has a sign,

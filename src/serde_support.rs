@@ -1,8 +1,11 @@
 use core::fmt;
 
+mod lane;
+
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::operand::sealed::{Class, Sealed};
 use crate::{Decimal32, Decimal64, Decimal128, Error, OrderedDecimal};
 
 struct FailedValue(&'static str, Error);
@@ -43,10 +46,61 @@ impl de::Expected for FailedValue {
 }
 
 macro_rules! decimal_serde {
-    ($decimal:ty, $width:ty, $encode:ident) => {
+    ($decimal:ty, $width:ty) => {
         impl Serialize for $decimal {
+            /// Writes the `Display` output as one string.
             fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                serializer.collect_str(self)
+                match Sealed::class(*self) {
+                    Class::Finite(v) => {
+                        // Reject wide coefficients before creating lane buffers.
+                        if let Ok(coeff) = u64::try_from(v.coeff)
+                            && let Some(value) = lane::SmallValue::new(v.neg, coeff, v.exp)
+                        {
+                            let mut small: lane::SmallText;
+                            let mut unsigned: fmt::NumBuffer<u64>;
+                            let mut signed: fmt::NumBuffer<i64>;
+                            let text = match value {
+                                lane::SmallValue::Unsigned(integer) => {
+                                    unsigned = fmt::NumBuffer::new();
+                                    integer.format_into(&mut unsigned)
+                                }
+                                lane::SmallValue::Signed(integer) => {
+                                    signed = fmt::NumBuffer::new();
+                                    integer.format_into(&mut signed)
+                                }
+                                lane::SmallValue::NegativeZero => "-0",
+                                lane::SmallValue::Fraction { neg, coeff, exp } => {
+                                    small = lane::SmallText::new();
+                                    small.text(neg, coeff, exp).map_err(|_| {
+                                        <S::Error as serde::ser::Error>::custom(
+                                            "decimal text does not fit its buffer",
+                                        )
+                                    })?
+                                }
+                            };
+                            return serializer.serialize_str(text);
+                        }
+                        let mut digits = crate::display::Digits::new();
+                        let parts = digits.parts(v, false);
+                        if let Some(text) = parts.digits_only() {
+                            return serializer.serialize_str(text);
+                        }
+                        if parts.text_len() > crate::display::TEXT_LEN {
+                            return serializer.collect_str(&parts);
+                        }
+                        let mut bytes = [0; crate::display::TEXT_LEN];
+                        let text = parts.compose(&mut bytes).map_err(|_| {
+                            <S::Error as serde::ser::Error>::custom(
+                                "decimal text does not fit its buffer",
+                            )
+                        })?;
+                        serializer.serialize_str(text)
+                    }
+                    Class::Nan { .. } => serializer.serialize_str("NaN"),
+                    Class::Infinite(neg) => {
+                        serializer.serialize_str(if neg { "-inf" } else { "inf" })
+                    }
+                }
             }
         }
 
@@ -76,7 +130,7 @@ macro_rules! decimal_serde {
 
                     fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
                         integer::<$width>(value < 0, value.unsigned_abs() as u128)
-                            .and_then(|value| <$decimal>::from_bits(crate::layout::$encode(value)))
+                            .map(<$decimal>::from_in_range)
                             .map_err(|error| {
                                 E::invalid_value(
                                     Unexpected::Signed(value),
@@ -87,7 +141,7 @@ macro_rules! decimal_serde {
 
                     fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
                         integer::<$width>(false, value as u128)
-                            .and_then(|value| <$decimal>::from_bits(crate::layout::$encode(value)))
+                            .map(<$decimal>::from_in_range)
                             .map_err(|error| {
                                 E::invalid_value(
                                     Unexpected::Unsigned(value),
@@ -98,7 +152,7 @@ macro_rules! decimal_serde {
 
                     fn visit_i128<E: de::Error>(self, value: i128) -> Result<Self::Value, E> {
                         integer::<$width>(value < 0, value.unsigned_abs())
-                            .and_then(|value| <$decimal>::from_bits(crate::layout::$encode(value)))
+                            .map(<$decimal>::from_in_range)
                             .map_err(|error| {
                                 E::invalid_value(
                                     Unexpected::Other("i128 integer"),
@@ -109,7 +163,7 @@ macro_rules! decimal_serde {
 
                     fn visit_u128<E: de::Error>(self, value: u128) -> Result<Self::Value, E> {
                         integer::<$width>(false, value)
-                            .and_then(|value| <$decimal>::from_bits(crate::layout::$encode(value)))
+                            .map(<$decimal>::from_in_range)
                             .map_err(|error| {
                                 E::invalid_value(
                                     Unexpected::Other("u128 integer"),
@@ -132,9 +186,9 @@ macro_rules! decimal_serde {
     };
 }
 
-decimal_serde!(Decimal32, crate::layout::W32, encode_32);
-decimal_serde!(Decimal64, crate::layout::W64, encode_64);
-decimal_serde!(Decimal128, crate::layout::W128, encode_128);
+decimal_serde!(Decimal32, crate::layout::W32);
+decimal_serde!(Decimal64, crate::layout::W64);
+decimal_serde!(Decimal128, crate::layout::W128);
 
 impl<T: Serialize> Serialize for OrderedDecimal<T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

@@ -129,6 +129,66 @@ fn format_all_coefficient_exponent_sign_classes_and_extreme_lengths() {
     }
 }
 
+/// Values whose text length crosses the limit of the stack text that
+/// serialization writes in one piece: coefficients 0, 1, 7, 10, 12345,
+/// 10^(p-1) and the maximum, plus `u64::MAX` and `u64::MAX + 1` where the
+/// width holds them, at every exponent from `-116` to `116` that the width
+/// allows, and the exponent limits and their neighbors.
+pub(crate) fn short_text_boundary(format: Format) -> std::vec::Vec<Finite> {
+    let (p, emin, emax) = bounds(format);
+    let max = 10_u128.pow(p) - 1;
+    let mut coeffs = std::vec![0, 1, 7, 10, 12345, 10_u128.pow(p - 1), max];
+    if max > u64::MAX as u128 {
+        coeffs.extend([u64::MAX as u128, u64::MAX as u128 + 1]);
+    }
+    let mut values = std::vec![];
+    for exp in (-116..=116)
+        .filter(|exp| (emin..=emax).contains(exp))
+        .chain([emin, emin + 1, emax - 1, emax])
+    {
+        for &coeff in &coeffs {
+            for neg in [false, true] {
+                values.push(Finite { neg, coeff, exp });
+            }
+        }
+    }
+    values
+}
+
+#[test]
+fn format_short_text_boundary_matches_reference() {
+    for format in FORMATS {
+        for v in short_text_boundary(format) {
+            let v = decoded(refbid::encode(v, format), format);
+            for strip in [false, true] {
+                let expected = reference(v, strip);
+                assert_eq!(actual(v, format, strip), expected, "v={v:?}, strip={strip}");
+                macro_rules! padded {
+                    ($value:expr) => {{
+                        let r = ReferenceFlags(expected.clone());
+                        for (a, b) in [
+                            (format!("{:>70}", $value), format!("{:>70}", r)),
+                            (format!("{:*^+70}", $value), format!("{:*^+70}", r)),
+                            (format!("{:+070}", $value), format!("{:+070}", r)),
+                            (format!("{:<1}", $value), format!("{:<1}", r)),
+                        ] {
+                            assert_eq!(a, b, "v={v:?}, strip={strip}");
+                        }
+                    }};
+                }
+                match (format, strip) {
+                    (Format::D32, false) => padded!(d32(v)),
+                    (Format::D32, true) => padded!(d32(v).stripped()),
+                    (Format::D64, false) => padded!(d64(v)),
+                    (Format::D64, true) => padded!(d64(v).stripped()),
+                    (Format::D128, false) => padded!(d128(v)),
+                    (Format::D128, true) => padded!(d128(v).stripped()),
+                }
+            }
+        }
+    }
+}
+
 struct ReferenceFlags(String);
 impl fmt::Display for ReferenceFlags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -1,6 +1,7 @@
 """Fast runner guard tests; no compiler, benchmark, or network is invoked."""
 import importlib.util
 import os
+import re
 import sys
 import json
 import subprocess
@@ -139,6 +140,26 @@ class BuildEnvironmentTests(unittest.TestCase):
                 self.assertEqual(env["CARGO_TARGET_DIR"], str(self.work / "target"))
                 self.assertEqual(env["CARGO_BUILD_BUILD_DIR"], str(self.work / "target"))
 
+    def test_serde_target_builds_with_its_feature(self):
+        artifact = {"reason": "compiler-artifact", "target": {"kind": ["bench"], "name": "serde"},
+                    "executable": "/not/executed"}
+        result = subprocess.CompletedProcess([], 0, json.dumps(artifact) + "\n", "")
+        for target, features in (("serde", ["--features", "serde"]), ("ops", [])):
+            artifact["target"]["name"] = target
+            result.stdout = json.dumps(artifact) + "\n"
+            with patch.object(BENCH.subprocess, "run", return_value=result) as run:
+                self.assertEqual(BENCH.build(self.work, target, "bench", 1, Path("/pinned/rustc"),
+                                             self.root / "log"), "/not/executed")
+                command = run.call_args.args[0]
+                self.assertEqual(command[command.index("--bench") + 1:], [target, *features])
+
+    def test_serde_target_runs_only_when_named(self):
+        self.assertEqual(BENCH.selected_targets(None), ["finite", "keys", "special", "ops"])
+        self.assertEqual(BENCH.selected_targets([]), ["finite", "keys", "special", "ops"])
+        self.assertEqual(BENCH.selected_targets(["serde"]), ["serde"])
+        self.assertEqual(BENCH.selected_targets(["ops", "serde"]), ["ops", "serde"])
+        self.assertIn("serde", BENCH.TIMED)
+
     def test_configuration_through_symlink(self):
         linked = self.root / "linked"
         linked.symlink_to(self.work, target_is_directory=True)
@@ -155,6 +176,17 @@ class BuildEnvironmentTests(unittest.TestCase):
         with patch.object(BENCH, "output", return_value=""):
             with self.assertRaisesRegex(SystemExit, "lists no benchmarks matching"):
                 BENCH.listed_titles("binary", self.work, filter="^missing$")
+
+
+class SerdeBenchmarkTests(unittest.TestCase):
+    def test_stack_text_matches_the_serializer_limit(self):
+        root = Path(__file__).resolve().parent.parent
+        limit = re.findall(r"^pub\(crate\) const TEXT_LEN: usize = (\d+);$",
+                           (root / "src/display.rs").read_text(), re.M)
+        stack = re.findall(r"^const STACK_TEXT: usize = (\d+);$",
+                           (root / "benches/serde.rs").read_text(), re.M)
+        self.assertEqual(len(limit), 1)
+        self.assertEqual(stack, limit)
 
 
 if __name__ == "__main__":

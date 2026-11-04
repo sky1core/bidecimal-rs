@@ -23,6 +23,7 @@ serde = { version = "1.0.229", default-features = false, optional = true }
 [dev-dependencies]
 criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
 num-bigint = "=0.5.1"
+serde_json = "=1.0.154"
 serde_test = "=1.0.177"
 
 [lints.rust]
@@ -66,3 +67,8 @@ harness = false
 [[bench]]
 name = "ops"
 harness = false
+
+[[bench]]
+name = "serde"
+harness = false
+required-features = ["serde"]
