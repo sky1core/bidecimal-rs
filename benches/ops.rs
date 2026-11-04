@@ -31,6 +31,8 @@ trait Operate: Number + fmt::Display {
     fn product_floor(self, other: Self) -> Result<Self, Error>;
     fn quantized_floor(self, exp: i32) -> Result<Self, Error>;
     fn multiple_floor(self, step: Self) -> Result<Self, Error>;
+    fn trimmed(self) -> Self;
+    fn stripped_value(self) -> Self;
     fn total_order(&self, other: &Self) -> Ordering;
 }
 macro_rules! operate {
@@ -54,6 +56,8 @@ macro_rules! operate {
             fn multiple_floor(self, step: Self) -> Result<Self, Error> {
                 self.round_to_multiple(step, Rounding::TowardNegative)
             }
+            fn trimmed(self) -> Self { self.trim_fraction_zeros() }
+            fn stripped_value(self) -> Self { self.strip_trailing_zeros() }
             fn total_order(&self, other: &Self) -> Ordering { self.total_cmp(other) }
         }
     )*};
@@ -505,6 +509,64 @@ fn comparison<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     });
 }
 
+fn trailing_zero_methods<T: Operate>(c: &mut Criterion) {
+    let mut rng = SplitMix64(SEED ^ 0x7a11_1e00);
+    let (qmin, qmax) = match T::WIDTH {
+        32 => (-101, 90),
+        64 => (-398, 369),
+        128 => (-6176, 6111),
+        _ => unreachable!("the three decimal widths only"),
+    };
+    let exponents = [qmin, -(T::DIGITS as i32), -1, 0, 1, qmax - 1, qmax];
+    let specs: Vec<Spec> = (0..COUNT)
+        .map(|i| {
+            let zeros = (i % T::DIGITS as usize) as u32;
+            let mut spec = rng.spec(T::DIGITS - zeros);
+            spec.coeff *= 10_u128.pow(zeros);
+            if i % 32 == 0 {
+                spec.coeff = 0;
+            }
+            spec.exp = exponents[i % exponents.len()];
+            spec
+        })
+        .collect();
+    let inputs: Vec<T> = specs.iter().map(|&spec| spec.parse()).collect();
+    for (&spec, &value) in specs.iter().zip(&inputs) {
+        for (fractional, result) in [(true, value.trimmed()), (false, value.stripped_value())] {
+            let mut expected = spec.fields();
+            if expected.coeff == 0 {
+                if !fractional || expected.exp < 0 {
+                    expected.exp = 0;
+                }
+            } else {
+                let upper = if fractional { 0 } else { qmax };
+                while expected.exp < upper && expected.coeff % 10 == 0 {
+                    expected.coeff /= 10;
+                    expected.exp += 1;
+                }
+            }
+            assert_eq!(
+                decoded(result),
+                expected,
+                "trailing_zeros_{}: {spec:?}, fractional={fractional}",
+                T::NAME
+            );
+        }
+    }
+    per_element(
+        c,
+        &format!("trim_fraction_zeros_{}", T::NAME),
+        &inputs,
+        |&x| x.trimmed(),
+    );
+    per_element(
+        c,
+        &format!("strip_trailing_zeros_{}", T::NAME),
+        &inputs,
+        |&x| x.stripped_value(),
+    );
+}
+
 fn width<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     parsing::<T>(c, rng);
     formatting::<T>(c, rng);
@@ -513,6 +575,7 @@ fn width<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     quantize::<T>(c, rng);
     multiple::<T>(c, rng);
     comparison::<T>(c, rng);
+    trailing_zero_methods::<T>(c);
 }
 
 fn ops(c: &mut Criterion) {

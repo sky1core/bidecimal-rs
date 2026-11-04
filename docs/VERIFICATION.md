@@ -7,8 +7,9 @@ comparison, OrderedDecimal key hashing, width conversion, addition, and
 subtraction for precisions 7, 16, and 34, multiplication and division of any
 two widths into any result width, quantize for all three widths, rounding to
 a multiple for all three widths, sign operations, integer/scale conversion,
-parsing, and allocation-free plain formatting with
-optional fractional zero stripping, and optional serde serialization.
+parsing, exact trailing-zero value transformations, allocation-free plain
+formatting with optional fractional zero stripping, and optional serde
+serialization.
 It does not cover performance.
 Test-only reference decoding reconstructs the interchange sign, combination
 field, exponent continuation, and coefficient independently of the library's
@@ -30,8 +31,9 @@ storage is constructed from validated bits, finite constants, exact widening,
 `fit` output, values accepted by `InRange::checked` on the fast paths of
 addition and subtraction, multiplication and parsing, quantize output and the
 unit-step multiple result with explicitly checked coefficient and exponent
-bounds, the encoded zero at qmin for finite/infinity division, or a
-sign operation on stored bits, which changes only the sign bit. Special
+bounds, the bounded coefficient/exponent transformation described below, the
+encoded zero at qmin for finite/infinity division, or a sign operation on
+stored bits, which changes only the sign bit. Special
 constants and result constructors produce canonical special encodings.
 After special classification, unpacking a finite value has coefficient
 `0 <= c < 10^P` and `qmin <= q <= qmax`. Widening preserves these fields and
@@ -57,6 +59,130 @@ same value fields or error kind; the native entry point also guarantees
 agreement with every result satisfying that contract. No new trusted
 standard-library specification is used. Public dispatch, finite extraction
 and encoding, and overflow mapping remain outside this Verus proof.
+
+## Trailing-zero value transformations
+
+`trim_fraction_zeros` and `strip_trailing_zeros` are same-width, exact value
+transformations, not formatting adapters. Their complete contract is in
+[SPEC.md](SPEC.md#trailing-zero-value-transformations). For nonzero finite
+`c*10^q`, they remove `min(v10(c), max(-q, 0))` and
+`min(v10(c), qmax-q)` coefficient zeros respectively. Both preserve the sign;
+the first maps a negative zero exponent to zero and otherwise retains that
+exponent, while the second maps every zero exponent to zero. Infinities are
+unchanged and NaNs are quieted with sign and payload retained.
+
+The implementation is manually written safe Rust, using existing exact
+power-of-ten division helpers. Generated test inputs are evidence about that
+implementation, not generated production code or a mechanical port. The
+[bounded integer argument](#bounded-trailing-zero-value-transformations)
+establishes the loop invariant, helper preconditions, range bounds,
+termination, and complete path partition. Existing direct Verus proofs cover
+`div_rem_pow10` and `div_rem_pow10_64` on every coefficient passed here. They
+do not prove the new public dispatch, exponent caps, zero handling, special
+handling, or composition of the calls. Those remain explicitly listed under
+[Obligations without a direct machine proof](#obligations-without-a-direct-machine-proof).
+No new direct Verus or Kani result is claimed for these methods.
+
+The implementation checks below passed on 2026-11-04 on Linux x86_64,
+including the new Decimal32 exhaustive run and the existing Verus suite.
+
+The tests are in `src/trailing_zero_tests.rs`. In each width's module,
+`boundary_cohorts` crosses the coefficient/exponent classes, decimal and
+binary boundaries, every possible trailing-zero count, the removal-limit
+boundaries, and signed zero at every exponent: 3,524 Decimal32, 12,476
+Decimal64 and 61,968 Decimal128 cohorts after deduplication.
+`fixed_seed_ten_thousand` uses 10,000 finite values per width, half biased
+toward trailing zeros.
+`special_encodings` includes signed infinities and quiet/signaling NaNs with
+boundary payloads, plus 10,000 fixed-seed raw bit patterns per width.
+`documented_cohorts_and_limit_stop` checks the API examples and stopping at
+`qmax` with coefficient zeros left.
+
+The finite reference independently decodes BID fields, searches exact
+arbitrary-precision powers of ten to select the largest allowed divisor,
+and independently encodes the expected fields. It calls no production
+layout or arithmetic helper. These generated tests compare result bits with
+that reference, check bitwise idempotence and both mixed compositions, exact
+numeric value and sign, `OrderedDecimal` key/hash preservation, and default
+`Display` against the original value's `stripped()` text. With `serde`
+enabled, they check serialization and the numeric-value/zero-sign string
+round trip. Special checks distinguish input signaling/quiet NaNs and verify
+output quieting, sign and payload bitwise.
+
+```sh
+cargo test --locked --lib trailing_zero_tests -- --test-threads=2
+cargo test --locked --features serde --lib trailing_zero_tests -- --test-threads=2
+cargo test --locked --lib decimal32_exhaustive_trailing_zero -- --ignored --test-threads=2 --nocapture
+```
+
+The last command selects the two finite sign lanes and the separate special
+encoding test. It does not run timing measurements. Their precise coverage
+and the separation from the generated presentation checks are given under
+[Decimal32 exhaustive trailing-zero transformations](#decimal32-exhaustive-trailing-zero-transformations).
+
+### Recorded implementation verification (2026-11-04)
+
+The final implementation passed all 21 gate invocations below on Linux
+x86_64, each with exit 0. The Rust 1.99.1 and MSRV 1.98.0 full test runs each reported
+114 passed / 19 ignored without serde and 132 passed / 20 ignored with serde,
+with zero failures and seven passing doc tests in each run. The separate
+1.99.1 doc-test commands each passed all seven tests too. The focused new
+module runs each passed 12 tests, with three ignored, both without and with
+serde. The three new ignored tests were then executed separately as recorded
+below; the other ignored suites are not claimed to have been rerun here.
+
+Rust 1.99.1 commands:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo clippy --all-targets --locked --features serde -- -D warnings
+cargo test --locked
+cargo test --locked --features serde
+cargo test --doc --locked
+cargo test --doc --locked --features serde
+cargo build --lib --locked --no-default-features
+cargo build --lib --locked --no-default-features --features serde
+cargo build --locked --lib --no-default-features --target thumbv7em-none-eabihf
+cargo build --locked --lib --no-default-features --target thumbv7em-none-eabihf --features serde
+cargo bench --locked --features serde --bench ops -- --test
+cargo bench --locked --features serde --bench keys -- --test
+cargo bench --locked --features serde --bench finite -- --test
+cargo bench --locked --features serde --bench special -- --test
+cargo bench --locked --features serde --bench serde -- --test
+```
+
+MSRV invocations used Rust/Cargo/Rustdoc 1.98.0 selected in the environment;
+the recorded command arguments were:
+
+```sh
+cargo build --lib --locked
+cargo build --lib --locked --features serde
+cargo test --locked
+cargo test --locked --features serde
+```
+
+The host and `thumbv7em-none-eabihf` builds cover no_std both without and
+with serde. All five `cargo bench ... -- --test` invocations passed their
+correctness checks, including the new operations; these test-mode runs make
+no runtime-performance claim.
+
+The existing pinned Verus suite was run with:
+
+```sh
+bash verification/verus-suite.sh
+```
+
+It reported `386 items verified in 231 crate functions; trusted: 7 std
+specifications` with Verus 0.2026.10.18.7d82994, Rust 1.99.1. This reruns the
+existing proof set and its trust-boundary checks; it adds no direct proof of
+the new public methods.
+
+The subsequent exhaustive invocation was:
+
+```sh
+cargo test --locked --features serde --lib decimal32_exhaustive_trailing_zero -- --ignored --nocapture --test-threads=2
+```
 
 ## Serialization
 
@@ -171,6 +297,11 @@ widening preserves fields and finite narrowing uses `fit`.
 `10^(P-1)` for the result, otherwise replacing the payload with zero; its
 encoding is always quiet. Bit decoding and sign operations preserve signaling
 NaNs; sign operations change only the sign bit.
+The trailing-zero value methods classify before finite extraction and clear
+only the signaling bit of a special value. Canonical infinity and quiet NaN
+encodings already have that bit clear, so infinity is unchanged and every NaN
+is quiet with the same sign and payload. Their same-width NaN output needs
+no payload narrowing.
 
 Finite kernel overflow is mapped by `overflow`, through `finish` for
 multiplication, division, narrowing, integer/scale construction and parsing,
@@ -560,8 +691,9 @@ Other trusted assumptions:
 Not covered by Verus: the remaining `kernel` helpers, including `mul`,
 `div`, `quantize` and the multiple rounding paths; P=7 equality/ordering,
 P=34 equality and the Kani-only `cmp_mag`/`cmp_general` reference; the parsers
-and formatter; and the public types' methods and conversions, including the
-widening `From` implementations. Their evidence is listed elsewhere here.
+and formatter; and the public types' methods and conversions, including both
+trailing-zero value methods and the widening `From` implementations. Their
+evidence is listed elsewhere here.
 
 ### Obligations without a direct machine proof
 
@@ -574,8 +706,8 @@ retained evidence is not a substitute for a proof.
 |---|---|---|
 | Composition of native general addition/subtraction with public dispatch: every canonical operand pair and result width, specials and all three modes | The native finite computation itself is proved above. Its public callers still must establish finite canonical inputs and select the appropriate format; the compile-time assertions prove the eight-width selection, but not runtime extraction, special handling, encoding or public overflow mapping. The public type methods and the common general-kernel selector are not verified by Verus. | The sealed operand implementations and selection assertions, canonical-storage proofs, `addsub_all_27_coefficient_gap_sign_classes`, general exact/compression boundary tests and independent BigInt differentials. These do not constitute dedicated coverage of every narrow-only boundary; see the explicit coverage limitation below. |
 | Special-value dispatch and results: all canonical operands, width combinations, modes, quantize targets, multiple steps and parsing/formatting inputs | Public class dispatch, NaN selection/quieting/payload fitting, invalid-operation results, zero-divisor results, directed overflow mapping, total comparison and OrderedDecimal key semantics have no full-domain direct proof. Kani covers special storage, constants and widening/narrowing back only; the finite Verus proofs assume their finite preconditions. | The Infinity and NaN source argument, every test in `src/special_tests.rs`, special branches of the four Decimal32 exhaustive tests, and the independent finite differentials. |
-| Caller preconditions of the representation rows: every call from production code that Verus does not verify of `InRange::checked`, `InRange::unchecked`, `unpack_canonical_128`, `canonical`, `is_largest_finite` and `exceeds_max` | Unproven: `checked`, `unchecked`, `is_largest_finite` and `exceeds_max` need `W` to be one of the three formats; `unchecked` also needs the value in range; `unpack_canonical_128` needs a finite canonical encoding; `canonical` needs `c<2^127` and `q<=2^31-39`; `exceeds_max` needs `c<=10^P-1`. The callers (the public types' constants and methods, `mul`, `quantize`, the multiple rounding paths and the parsers `parse_32`, `parse_64`, `parse_chunks` and `parse_general`) are not verified. | `Width` is sealed and implemented only by the three formats; finite storage comes from validated finite bits or `encode`; special storage is classified before finite extraction; the value-range argument recorded at each caller; the Kani harnesses and tests that exercise those callers. |
-| Caller preconditions of the Verus-proved helpers: every call from production code that Verus does not verify of `div_rem_pow10`, `div_rem_pow10_64`, `div_rem_scaled`, `strip_trailing_zeros`, `strip_trailing_zeros_64`, `scaled_rem`, `scaled_is_multiple`, `fit`, `add_sub`, `add_sub_general`, the `narrow` entry point and the W64/W128 comparison entry points | Unproven: each caller must establish the helper's precondition (`requires`), and the Verus proofs above assume it; for `fit` this is the format, `c<2^127`, `pref<=q` for nonzero `c` and `c>=10^(P-1)` when sticky; for `add_sub` and `add_sub_general` it is the format and both operands in the Decimal128 range; for the `narrow` entry point it is a W32/W64 result and both operands in the Decimal64 range; for W64/W128 comparison it is both operands in the corresponding range, established by unverified public dispatch and decoding; for `div_rem_scaled` it is `a<10^34`, `0<b<10^34` and `a*10^k<b*10^35`. The hard point is that the callers (the public types' addition and subtraction methods, `mul_general`, `div`, `quantize`, `round_to_multiple`, `round_to_unit_multiple_64`, `round_to_multiple_general`, `parse_general` and width conversion) are not verified. | The value-range argument recorded at each caller (the `clippy::arithmetic_side_effects` reason), the Kani harnesses and tests that exercise those callers, and the caller arguments below. |
+| Caller preconditions of the representation rows: every call from production code that Verus does not verify of `InRange::checked`, `InRange::unchecked`, `unpack_canonical_128`, `canonical`, `is_largest_finite` and `exceeds_max` | Unproven: `checked`, `unchecked`, `is_largest_finite` and `exceeds_max` need `W` to be one of the three formats; `unchecked` also needs the value in range; `unpack_canonical_128` needs a finite canonical encoding; `canonical` needs `c<2^127` and `q<=2^31-39`; `exceeds_max` needs `c<=10^P-1`. The callers (the public types' constants and methods, including both trailing-zero value methods, `mul`, `quantize`, the multiple rounding paths and the parsers `parse_32`, `parse_64`, `parse_chunks` and `parse_general`) are not verified. | `Width` is sealed and implemented only by the three formats; finite storage comes from validated finite bits or `encode`; special storage is classified before finite extraction; the value-range argument recorded at each caller; the Kani harnesses and tests that exercise those callers. |
+| Caller preconditions of the Verus-proved helpers: every call from production code that Verus does not verify of `div_rem_pow10`, `div_rem_pow10_64`, `div_rem_scaled`, `strip_trailing_zeros`, `strip_trailing_zeros_64`, `scaled_rem`, `scaled_is_multiple`, `fit`, `add_sub`, `add_sub_general`, the `narrow` entry point and the W64/W128 comparison entry points | Unproven: each caller must establish the helper's precondition (`requires`), and the Verus proofs above assume it; for `fit` this is the format, `c<2^127`, `pref<=q` for nonzero `c` and `c>=10^(P-1)` when sticky; for `add_sub` and `add_sub_general` it is the format and both operands in the Decimal128 range; for the `narrow` entry point it is a W32/W64 result and both operands in the Decimal64 range; for W64/W128 comparison it is both operands in the corresponding range, established by unverified public dispatch and decoding; for `div_rem_scaled` it is `a<10^34`, `0<b<10^34` and `a*10^k<b*10^35`. The hard point is that the callers (the public types' addition, subtraction and trailing-zero value methods, `mul_general`, `div`, `quantize`, `round_to_multiple`, `round_to_unit_multiple_64`, `round_to_multiple_general`, `parse_general` and width conversion) are not verified. | The value-range argument recorded at each caller (the `clippy::arithmetic_side_effects` reason), the Kani harnesses and tests that exercise those callers, and the caller arguments below. |
 | `eq`/`cmp`: finite canonical operands, `P=max(source precisions)`, coefficients below `10^P`; every gap for P=7, and equality for P=34 | Numeric correctness of the P=7 equality/ordering and the P=34 equality path. P=7 agreement with `cmp_general` is proved over every gap, and P=34 equality agreement at gap 0; the Kani-only reference's numeric correctness has no direct proof. P=16 equality/ordering and P=34 ordering are proved over their whole finite domains by Verus. | The comparison argument below, `comparison_alignment_boundaries_all_width_pairs`, and `comparison_extreme_exponents_all_width_pairs`. |
 | `cmp_general`: finite canonical operands of every width; Kani reference only | Its numeric correctness remains unproved on every domain. It is not compiled into the production library or called by production ordering. P=7 and gap-zero P=34 agreement with this reference do not by themselves establish numeric correctness. | The ordered-exponent digit guard argument below and the comparison tests. |
 | `parse_64`: all accepted and rejected input bytes reaching its 8..17-byte significand paths, both signs and every direction | The complete two-word parser for significands of 9 or more bytes, results produced by the fallback parsers, and non-ASCII input. Only the fast-path results for ASCII strings of length 8 are proved, in the stubbed table above. The hard point is the combined lane conversion and wide coefficient accumulation; a proof of `parse_eight` alone is insufficient. | The SWAR and bounded-scan arguments below, `parse_short_significands_match_independent_reference`, `parse_short_significands_match_general_parser`, and `parse_invalid_bytes_at_each_chunk_position`. |
@@ -586,6 +718,7 @@ retained evidence is not a substitute for a proof.
 | `quantize`: finite canonical value of each width, every `i32` target exponent and both directions | The target range check, the digit guard and the product when scaling up, the increment after the reciprocal division when scaling down, and the zero path. The division `div_rem_pow10` itself is proved by Verus above. | The quantize argument below, `quantize_all_width_coefficient_exponent_target_sign_classes`, `quantize_zero_all_targets_invalid_targets_and_precision_edges`, `quantize_decimal32_exhaustive_reference`, and the BigInt quantize differentials. |
 | `round_to_multiple_general`: finite canonical value and positive finite canonical step of the same width, both directions | General division and remainder, representability, and overflow classification, including agreement of the unit-step path with the general path and the use of the Verus-proved overflow helpers `is_largest_finite` and `exceeds_max`. The scaled remainder and divisibility helpers themselves are proved by Verus above. The hard point is symbolic wide division by an arbitrary step; a unit-step or selected-exponent proof does not cover arbitrary positive steps. | The multiple-rounding argument below, `multiple_coefficient_exponent_sign_and_step_cohort_classes`, boundary/error tests, and independent rational floor/ceiling followed by exact fitting. |
 | `display::fmt` (the finite branch of public formatting): every finite canonical value of each width, every width, fill, alignment and flag, and every writer | The digits, decimal point and zeros of the plain and stripped strings, the padding, and the propagation of every writer error. | The plain notation formatting argument below, `format_all_coefficient_exponent_sign_classes_and_extreme_lengths`, `format_flags_precision_ignored_and_debug_equals_display`, `format_writer_errors_propagate_on_direct_and_padded_paths`, the format/parse differentials and `decimal32_exhaustive_format_parse_round_trip`. |
+| `trim_fraction_zeros` and `strip_trailing_zeros`: every canonical value of each width | Public class dispatch, zero exponent selection, the fractional/exponent cap, the bounded removal loop, result encoding, and their composition have no direct machine proof. The division helpers are proved over the full coefficient domains, but that does not prove their unverified callers. | The bounded trailing-zero argument below, independent-reference boundary/cohort and seeded tests, signed-special tests, bitwise idempotence/composition, formatting/key/hash/serde checks, and the new Decimal32 exhaustive check. Recorded execution and its scope are distinguished above. |
 | Negation, `abs`, `copysign`, `is_sign_negative`, `is_sign_positive` of each public type, and `Hash` of `OrderedDecimal`: every canonical value of each width | That negation, `abs` and `copysign` change only the sign bit and the two sign tests read it, and that `Hash` gives equal values, including cohort members, both zero signs and values of different widths, the same hasher input. Parts are proved above: finite `class` fields by the public storage harnesses and finite `canonical` by Verus; their composition is not machine-checked. | The sign operations and canonical hashing arguments below, the sign checks in `decimal32_exhaustive_reference`, `decimal64_structured_splitmix64_reference`, `decimal128_structured_splitmix64_reference` and `all_exponents_signs_and_coefficient_boundaries`, `decimal128_construction_paths_store_small_form`, `cohort_hashes_cross_width_and_zero_signs`, and `ordered_decimal_hash_inputs_separate_keys_across_widths`. |
 
 A direct-code result in this document names the actual harness, its exact
@@ -693,6 +826,69 @@ decreases the input, and native division by a nonzero constant is exact.
 `strip_trailing_zeros_64_matches_naive_for_every_count` checks every count
 0..15 with boundary, fixed and 1,000 random units against repeated division by
 ten.
+
+### Bounded trailing-zero value transformations
+
+Domain: every canonical finite value of each format, with magnitude
+`0<=c<10^P`, `qmin<=q<=qmax`, and either sign. Infinity and NaN dispatch is
+separate, as described above. The limits in this paragraph are mathematical
+integers: `L=max(-q,0)` for `trim_fraction_zeros` and `L=qmax-q` for
+`strip_trailing_zeros`. Both are nonnegative, and every intermediate exponent
+calculation is bounded by the supported range: `-q` is at most 6176 and
+`qmax-q` at most 12287, far inside `i32`.
+
+For `c=0`, the result exponent is respectively `max(q,0)` or zero. Both are
+in range and keep the sign. This branch is required: zero has no largest
+finite count of decimal trailing zeros. For nonzero `c`, let the input be
+`(c0,q0)` and let `r` count accepted divisions. The loop invariant is
+
+```text
+c0 = c * 10^r, c > 0, q = q0+r, 0 <= r <= L.
+```
+
+Each step divides by ten exactly when the remainder is zero and the exponent
+cap allows a step. The division result `d` is positive and smaller than `c`,
+and `c=10*d`, so replacing `(c,q,r)` with `(d,q+1,r+1)` preserves the
+invariant. A nonzero coefficient below `10^P` has at most `P-1` trailing
+zeros. The loop therefore terminates after at most 6, 15, or 33 accepted
+steps, and returns `r=min(v10(c0),L)`; it may test one final nonzero remainder.
+The coefficient only decreases. The new exponent is no lower than `qmin`
+and no greater than `qmax`; for the fractional method it cannot cross zero
+from below, and an already nonnegative exponent is unchanged. Encoding the
+result is therefore canonical without fitting or rounding.
+
+Decimal32 and Decimal64 coefficients fit exactly in `u64`, since
+`c<10^16<2^63`; every call to `div_rem_pow10_64(c,1)` meets its proved domain.
+Their extra limit from the binary trailing-zero count is safe because
+`10^r | c` implies `2^r | c`, so `v10(c)<=v2(c)`. At a binary-count limit
+below the exponent cap, no decimal factor of ten can remain. Decimal128 uses
+the simple one-digit loop and `div_rem_pow10(c,1)`; `c<10^34<2^127` holds at
+entry and after every step. The existing uncapped
+`strip_trailing_zeros_64` removes zeros in 8/4/2/1-digit chunks, so substituting
+it alone would not implement the bounded removal loop. No new kernel helper
+or trusted arithmetic specification is needed.
+
+The invariant proves exact value and sign preservation for every loop
+iteration, not just the tested representatives. When a nonzero fractional
+result stops, its exponent is nonnegative or its coefficient is not divisible
+by ten. When a nonzero coefficient-stripped result stops, its exponent is
+`qmax` or its coefficient is not divisible by ten. These are fixed points for
+the same operation. The second result is also a fixed point for the first;
+performing the first operation before the second consumes part of the same
+removable decimal factor. The explicit zero rules and one-time NaN quieting
+are fixed points too. Thus both operations are bitwise idempotent, and both
+mixed compositions have the bits of `strip_trailing_zeros` alone.
+
+Removing coefficient zeros only moves the decimal point within the same
+exact decimal value. The fractional method removes precisely the suffix the
+existing `stripped()` adapter omits. Additional integer zeros removed by the
+coefficient method are restored by positive-exponent plain formatting, so
+both results have that same text. Signed-zero and special formatting agree
+with the explicit rules above. Numeric keys and hashes are preserved because
+`OrderedDecimal` already identifies finite cohorts, zero signs, and all NaNs;
+NaN numeric comparison remains unordered. Raw bits, component accessors,
+`total_cmp` cohort distinctions, and later arithmetic preferences need not
+remain unchanged.
 
 ### Fitting a coefficient
 
@@ -1575,14 +1771,17 @@ propagated. No library formatting path allocates.
 
 All tests use the optimized test profile with integer overflow checks enabled.
 Each test runs on one thread, so the test harness's `--test-threads` setting
-bounds the cores a run occupies. Sixteen tests are ignored by default and run
-with `cargo test -- --ignored`: the five Decimal32 exhaustive tests (`decimal32_exhaustive_reference`,
+bounds the cores a run occupies. Without the optional serde feature, nineteen
+tests are ignored by default and run with `cargo test -- --ignored`: the five
+existing Decimal32 exhaustive tests (`decimal32_exhaustive_reference`,
 `decimal32_exhaustive_widening_reference`, `quantize_decimal32_exhaustive_reference`,
 `decimal32_exhaustive_format_parse_round_trip` and
-`int_scale_decimal32_exhaustive_reference`), the nine tests whose names end in
+`int_scale_decimal32_exhaustive_reference`), the three trailing-zero exhaustive
+tests listed below, the nine tests whose names end in
 `_million` or contain `_million_per_`, `mul_decimal128_pair_every_coefficient_class_pair`
-and `div_every_coefficient_class_pair`. The other tests run with `cargo test`
-(the serde tests with `cargo test --features serde`), including
+and `div_every_coefficient_class_pair`. The serde feature adds the ignored
+100-million-input SWAR test described in Serialization. The other tests run
+with `cargo test` (the serde tests with `cargo test --features serde`), including
 the ten-million-input structured and widening tests and the million-input kernel division
 tests.
 
@@ -1594,6 +1793,9 @@ tests.
 | Decimal64 widening | `decimal64_widening_ten_million_reference`: 10,000,000 independently constructed and decoded values; `widening_keeps_parts_for_all_classes`: all coefficient/exponent classes in both source widths |
 | Comparison | `decimal32_all_class_pairs_bigint_comparison`: every ordered pair of Decimal32 coefficient/exponent classes, both signs; `all_nine_width_pairs_bigint_random`: 2,000 pairs for each of nine width combinations; `all_nine_width_pairs_bigint_million`: 1,000,000 per combination |
 | Equality/hash/sign | `cohort_hashes_cross_width_and_zero_signs`: every class member, every representable cohort expansion, cross-width equal values, zero at extreme exponents and both signs; all finite pair comparisons also check equality and OrderedDecimal hash agreement when equal |
+| Trailing-zero value transformations | In each of `trailing_zero_tests::decimal32`, `decimal64`, and `decimal128`: `boundary_cohorts`, `fixed_seed_ten_thousand`, and `documented_cohorts_and_limit_stop`; independent arbitrary-precision expected bits, every removal-count/limit boundary, 10,000 seeded finite values per width, idempotence/composition, value/sign/key/hash preservation, stripped-text equality and serde round trips when enabled |
+| Trailing-zero specials | Each width's `special_encodings`: both infinity signs, quiet/signaling NaNs with signed boundary payloads, and 10,000 fixed-seed raw encodings per width; quieting, sign and payload preservation, class handling and canonical-input rejection |
+| Decimal32 trailing-zero transformations | `decimal32_exhaustive_trailing_zero_methods_positive` and `decimal32_exhaustive_trailing_zero_methods_negative`: all 3,840,000,000 canonical finite cohorts combined; `decimal32_exhaustive_trailing_zero_special_encodings`: all 268,435,456 raw infinity/NaN-range patterns; see the exact domain and properties below. Recorded execution: three tests passed, with the scope below |
 | Narrowing | `narrowing_all_coefficient_exponent_classes_bigint`: each of three width pairs, all classes and all three modes; `narrowing_three_pairs_bigint_random`: 2,000 values per pair; `narrowing_three_pairs_bigint_million`: 1,000,000 per pair, each in exact mode and both directions |
 | Integer/scale construction | `int_scale_construction_boundary_classes`: every integer digit length through the signed maximum, powers of ten and neighbors, all-nines, trailing-zero coefficients, both signs, MIN/MAX, precision and exponent transitions, scales at both i32 extrema, exact and both directions; `int_scale_construction_fixed_seed_differential`: 2,000 fixed-seed pairs per width, full-range integers and mixed near-range/full-i32 scales, all three modes, against parser bits/errors and independent arbitrary-precision reference |
 | Integer/scale decomposition | `int_scale_decomposition_classes_and_roundtrip`: coefficient/exponent classes, every exponent with zero/unit/maximum and steering-boundary neighbors, both signs, both infinities and signed quiet/signaling NaNs at zero/unit/maximum payload; `int_scale_decomposition_fixed_seed_bits`: 10,000 raw patterns per width against independent decoding; `int_scale_documented_contract`: preferred exponent, trailing zeros and negative-zero sign loss; `int_scale_decimal32_exhaustive_reference`: ignored full-domain decomposition/round-trip check |
@@ -1638,6 +1840,55 @@ Canonical specials use only plain formatting in this exhaustive test: parsing
 must retain NaN/infinity classification and the infinity sign. A formatted
 NaN loses its sign and payload; this branch does not inspect the parsed
 NaN signaling bit or payload.
+
+### Decimal32 exhaustive trailing-zero transformations
+
+The two ignored finite tests,
+`decimal32_exhaustive_trailing_zero_methods_positive` and
+`decimal32_exhaustive_trailing_zero_methods_negative`, divide the domain by
+sign. Each visits coefficients `0..=9_999_999` and every exponent
+`-101..=90`: 1,920,000,000 canonical finite cohorts per sign, hence
+3,840,000,000 combined. Each input and expected result is constructed from
+its fields by the independent BID encoder. Both methods are compared bitwise
+with a bounded native
+integer reference, and checked for idempotence, both mixed compositions,
+finite numeric equivalence and sign preservation. The native reference is
+cross-checked against the independent BigUint reference by the ordinary
+generated coefficient/exponent and seeded tests. Those tests also independently
+decode the actual result fields; the exhaustive loops compare reference
+encodings directly.
+
+The native reference is exact throughout this domain: `c<10^7` limits the
+nonzero trailing-zero count to six, every selected power is at most `10^6`,
+all exact quotient/remainder arithmetic fits its integer type, and the
+exponent cap keeps the output in `-101..=90`. Zero is handled separately.
+This domain argument justifies avoiding arbitrary-precision allocation for
+every exhaustive case; the ordinary generated tests retain the independent
+arbitrary-precision oracle.
+
+The ignored `decimal32_exhaustive_trailing_zero_special_encodings` visits all
+268,435,456 raw patterns in the infinity and NaN combination-field ranges,
+including noncanonical encodings. The independent classifier requires the
+latter to be rejected by `from_bits`. The accepted domain is two infinities
+and 4,000,000 NaNs: both signs and both quiet/signaling forms for each payload
+`0..=999_999`. Infinity bits are unchanged; each NaN retains its sign and
+payload with the signaling bit cleared. Both transformations, idempotence
+and both compositions are checked bitwise.
+
+Together these tests exhaust every canonical Decimal32 input to the methods
+and every raw special-range pattern. They do not re-enumerate rejected raw
+finite encodings, which remain covered by `decimal32_exhaustive_reference`.
+The exhaustive loops do not format, hash or serialize each input. Those
+properties are exercised on all generated boundary/cohort and seeded samples
+and supported over the full domain by the integer/class argument; they are
+not claimed to have been exhaustively executed. The finite tests report
+progress counts and wall time; each test asserts its complete domain count,
+and the special test reports wall time.
+
+Recorded production execution on 2026-11-04 on Linux x86_64 took about
+67 seconds, with all three tests passing. Each finite sign lane checked
+1,920,000,000 cohorts. The special-range assertions confirmed 2 accepted
+infinities, 4,000,000 accepted NaNs and 264,435,454 rejected patterns.
 
 ### Decimal32 exhaustive quantize reference
 
@@ -1684,6 +1935,7 @@ establish the result for all members of each following disjoint path class.
 |---|---|---|
 | Integer/scale construction: zero/nonzero; either sign; magnitude below 2^127/at 2^127; precision fits/exceeds P; preferred exponent below/within/above range; exact remainder/sticky; no direction/either direction | Unsigned magnitude and widened scale negation preserve all inputs; the sole 2^127 magnitude is reduced with a sticky fraction within fit's domain. Existing fitting and overflow rules cover every resulting coefficient, exponent and mode | `int_scale_construction_boundary_classes`, `int_scale_construction_fixed_seed_differential` |
 | Integer/scale decomposition: every width; both signs; zero/nonzero; both accepted coefficient forms; every exponent | Stored coefficient and exponent bounds fit the output types. Preserving these fields makes reconstruction bit-identical except that integer zero carries no sign | `int_scale_decomposition_classes_and_roundtrip`, `int_scale_decomposition_fixed_seed_bits`, `int_scale_documented_contract`, ignored `int_scale_decimal32_exhaustive_reference`; the class test also checks infinity and quiet/signaling NaN rejection |
+| Trailing-zero value transformations: each width and sign; zero/nonzero; q negative/zero/positive; trailing-zero count below/at/above the fractional or exponent cap; binary-count cap or nonzero remainder on the narrow loop | Each exact division preserves `c0=c*10^r` and `q=q0+r`; the decimal count is bounded by both coefficient precision and, on the narrow path, the binary count. Zero has a separate in-range exponent rule. Every finite input belongs to one of these classes, and the invariant gives the exact output throughout each class | The three width modules' `boundary_cohorts`, `fixed_seed_ten_thousand`, and `documented_cohorts_and_limit_stop`, plus the two finite Decimal32 exhaustive sign lanes in `src/trailing_zero_tests.rs`; special handling uses `special_encodings` and the separate exhaustive special-range test |
 | Finite extraction: Decimal128 finite canonical small form; Decimal32/Decimal64 both finite coefficient forms | Decimal128's excluded form has coefficient >=2^113, above its maximum; after special classification, fixed field extraction equals general decoding on every finite canonical value | `comparison_decimal128_canonical_storage_boundary` checks 64/112-bit limb boundaries, the maximum and first invalid coefficient, and both excluded finite combination extremes against independent decoding; `comparison_alignment_boundaries_all_width_pairs`, `comparison_extreme_exponents_all_width_pairs` and `cohort_hashes_cross_width_and_zero_signs` check public comparison against independent decoding and hashing; `decimal128_construction_paths_store_small_form` checks constants, parsing including `FromStr`, decoding, quantize, widening including Decimal32/Decimal64 values rounded to a multiple, addition and subtraction with and without a rounding direction for all nine operand width pairs, and multiplication with and without a rounding direction for all nine operand width pairs into Decimal128, and rounding to a multiple; it filters out special results and requires at least one successful finite result for each path and width pair, and asserts the stored coefficient and exponent of a rounded parse and a rounded addition that carry out of 34 digits; `decimal128_from_bits_rejects_large_form` checks the finite large-form extremes (combination field 24 to 29, both signs, low 122 bits all zero or all one) and 100,000 patterns with a combination field drawn from 24 to 29 and random sign and low 122 bits |
 | Comparison: special/finite; P=7/16 direct or clamped alignment; P=34 signed alignment at gaps 0..4, or larger gaps with different/equal adjusted exponents | Class handling and identical-bit shortcuts preserve NaN and infinity rules; clamping preserves P=7/16 order; P=34 small-gap alignment stays below `10^38`, and larger-gap digit intervals decide different adjusted exponents while equality bounds the single exact alignment product below `10^34` | `comparison_alignment_boundaries_all_width_pairs`, `comparison_extreme_exponents_all_width_pairs`, and `comparison_exponent_gap_digit_guard_and_sign_classes` cross all widths, signs, zeros, exponent gaps and cohort neighbors; P=16 and P=34 ordering also have the whole-domain Verus proofs above |
 | Equality: Decimal32/Decimal64 identical bits; P=7/16 direct coefficient equality at equal exponents or clamped alignment otherwise; for P=34, gap magnitude <=4 or >4; both/one/no zero; equal/different signs; gap magnitude 1..33 or >=34; aligned product fits/overflows u128 | Exact alignment is necessary and sufficient; overflow and gaps >=34 cannot match a supported coefficient. These disjoint decisions exhaust all finite pairs and agree with OrderedDecimal Ord and decimal PartialOrd | `comparison_alignment_boundaries_all_width_pairs` covers all nine pairs and both orders, all gaps 0..39, coefficient maxima, exact cohort neighbors and checked-product overflow neighbors; `comparison_extreme_exponents_all_width_pairs` covers maximal cross-width gaps and zero signs; the other comparison and cohort tests in `src/compare_tests.rs` also apply |

@@ -261,6 +261,54 @@ result = step × to_integer(x / step), returned in the type of x and step
   of negative zero: its pair is `(0, scale)`, and reconstruction gives positive
   zero. The original sign remains available through `is_sign_negative`.
 
+### Trailing-zero value transformations
+
+Each decimal width provides `trim_fraction_zeros(self) -> Self` and
+`strip_trailing_zeros(self) -> Self`, both marked `#[must_use]`. Both return
+the same type, preserve the exact finite numeric value and sign, and do not
+round, allocate, or return an error. Unlike `stripped()`, which is a formatting
+adapter, these methods return a decimal value whose stored cohort may change.
+
+`trim_fraction_zeros` removes trailing zeros only from the fractional portion
+of a finite value. For a nonzero value with stored coefficient magnitude `c`
+and exponent `q`, it divides `c` by the largest exact power `10^r` with
+`r <= max(-q, 0)`, returning exponent `q+r`. A zero with negative exponent is
+returned with exponent zero; a zero with a nonnegative exponent keeps its
+exponent. Its sign is retained.
+
+`strip_trailing_zeros` removes as many trailing coefficient zeros as the format
+permits, including integer zeros. For a nonzero value it divides `c` by the
+largest exact power `10^r` with `r <= qmax-q`, returning exponent `q+r`. It
+stops at the format's greatest exponent and leaves any remaining coefficient
+zeros, without error. A zero is returned with exponent zero and its original
+sign. Here `qmax` is 90, 369, or 6111 for Decimal32, Decimal64, or Decimal128.
+
+Both methods return an infinity unchanged. A NaN returns a quiet NaN with the
+same sign and payload. Both methods are bitwise idempotent. Applying
+`strip_trailing_zeros` after `trim_fraction_zeros` gives the same bits as
+`strip_trailing_zeros` alone; applying `trim_fraction_zeros` after
+`strip_trailing_zeros` leaves the latter's bits unchanged.
+
+For example, both methods turn `1.5000` into coefficient 15 and exponent -1.
+For `1500` at exponent zero, `trim_fraction_zeros` keeps coefficient 1500 and
+exponent zero, while `strip_trailing_zeros` returns coefficient 15 and exponent
+2; both results still display as `1500`. For `0E+5`, the first method keeps
+exponent 5 and the second returns exponent zero, retaining either zero sign.
+A negative signaling NaN with payload 7 becomes a negative quiet NaN with
+payload 7 under either method.
+
+The methods can change the stored cohort, so coefficient, exponent, scale,
+raw bits, representation distinctions in `total_cmp`, and the preferred
+exponents of subsequent arithmetic may change. Numeric comparisons and `OrderedDecimal`
+keys and hashes do not change. Default `Display` and serde serialization of
+either result have the same text as the existing stripped formatting of the
+input. The unmodified input's default formatting and serialization continue
+to preserve fractional zeros.
+
+String round trips preserve the existing numeric-value and zero-sign
+contract. They do not promise to retain `strip_trailing_zeros`' positive
+exponent or NaN sign, payload, or signaling state.
+
 ### Parsing
 
 - Converts a string to each type.
@@ -284,7 +332,10 @@ result = step × to_integer(x / step), returned in the type of x and step
   `NaN`, without its sign and payload, as for `f64`.
 - By default the value's own exponent is shown: coefficient 15000 with exponent
   −4 is `1.5000`; coefficient 15 with exponent 2 is `1500`.
-- An option strips trailing fractional zeros: `1.5000` → `1.5`, `2.000` → `2`.
+- The `stripped()` formatting adapter strips trailing fractional zeros:
+  `1.5000` → `1.5`, `2.000` → `2`, without changing the stored value. For
+  decimal-value results, see
+  [Trailing-zero value transformations](#trailing-zero-value-transformations).
 - A negative zero keeps its sign: `-0`, `-0.00`.
 - Parsing the output gives back an equal value, or a quiet NaN for a NaN.
   The output does not carry a positive exponent, so the parsed value's
@@ -317,6 +368,11 @@ result = step × to_integer(x / step), returned in the type of x and step
   `Display` and parsing.
 - `OrderedDecimal<T>` delegates to its wrapped value without adding a wrapper
   to the representation or normalizing equal keys.
+- To serialize without fractional trailing zeros, serialize
+  `x.trim_fraction_zeros()` using the existing implementation. The two
+  [trailing-zero value transformations](#trailing-zero-value-transformations)
+  have the same stripped text; neither adds a serde helper nor a `Serialize`
+  implementation for `Stripped<T>`.
 
 ## Verification
 

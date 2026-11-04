@@ -144,3 +144,5 @@ mod serde_tests;
 mod special_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod trailing_zero_tests;

@@ -69,6 +69,8 @@ zero: `1 / 0` is an infinity and `0 / 0` is NaN; see
 | Components | `coefficient()`, `mantissa()` (alias), `exponent()`, `scale()` (= −exponent); finite values only | `Result<i32/i64/i128>` / `Result<i32>` | None |
 | Coefficient and exponent | `T::from_coefficient_and_exponent(coefficient, exponent)`, `_rounded` variant, `x.to_coefficient_and_exponent()` | `T` / `(i32/i64/i128, i32)` | Without / with for construction |
 | Mantissa and scale | `T::from_mantissa_and_scale(mantissa, scale)`, `T::from_mantissa_and_scale_rounded(mantissa, scale, dir)`, `x.to_mantissa_and_scale()`; value = integer × 10^(−scale) | `T` / `(i32/i64/i128, i32)` | Without / with for construction |
+| Fractional trailing-zero removal | `x.trim_fraction_zeros()` | Same as `x` | None; always exact |
+| Coefficient trailing-zero removal | `x.strip_trailing_zeros()`; stops at the format's greatest exponent | Same as `x` | None; always exact |
 | Parsing | `T::parse(s)`, `str::parse`, `T::parse_rounded(s, dir)` | `T` | Without / with |
 | Formatting | `Display`; `x.stripped()` removes trailing fractional zeros | Text | None; never rounds |
 | Comparison | `==`, `<` and the other comparison operators within and across widths (a NaN is unordered); `total_cmp` (IEEE 754-2019 totalOrder); `is_zero`, `is_positive`, `is_negative` | `bool` / `Option<Ordering>` / `Ordering` | None |
@@ -76,12 +78,23 @@ zero: `1 / 0` is an infinity and `0 / 0` is NaN; see
 | Classification | `is_nan`, `is_infinite`, `is_finite`, `classify`; constants `NAN`, `INFINITY`, `NEG_INFINITY` | `bool` / `FpCategory` | None |
 | Encoding | `x.to_bits()`, `T::from_bits(bits)` | `u32`/`u64`/`u128` / `T` | None |
 
+Both trailing-zero methods return a decimal value, unlike the `stripped()`
+formatting adapter. For `1500`, `trim_fraction_zeros()` keeps coefficient 1500
+and exponent 0; `strip_trailing_zeros()` returns coefficient 15 and exponent 2.
+Both still display as `1500`. To serialize without fractional trailing zeros,
+serialize `x.trim_fraction_zeros()` with the existing serde implementation.
+See the [value-transformation contract](docs/SPEC.md#trailing-zero-value-transformations)
+for signed zeros, NaNs, and cohort changes.
+
 ## Status
 
 Every supported operation is implemented. Correctness evidence combines the
 integer arguments, exhaustive Decimal32 checks, independent
 arbitrary-precision tests, and the infinity and NaN tests described in
 [VERIFICATION.md](docs/VERIFICATION.md).
+The trailing-zero methods also have a full-domain integer argument, independent
+generated tests, and a completed exhaustive check of every canonical
+Decimal32 input; the exact scope and recorded results are listed there.
 The optional reciprocal verifier additionally checks a full-domain integer
 model using the current production constants. Direct machine verification of
 the Rust arithmetic is incomplete; the verified model, its trust boundary, and
@@ -99,6 +112,7 @@ the obligations without a direct machine proof are listed separately there.
 | Rounding to a multiple | Met | [VERIFICATION.md](docs/VERIFICATION.md): Rounding to a multiple |
 | Quantize | Met | [VERIFICATION.md](docs/VERIFICATION.md): Quantize, Decimal32 exhaustive quantize reference |
 | Sign operations | Met | [VERIFICATION.md](docs/VERIFICATION.md): Sign operations |
+| Trailing-zero value transformations | Met | [VERIFICATION.md](docs/VERIFICATION.md#trailing-zero-value-transformations): contract, integer argument, independent-reference and exhaustive checks |
 | Comparison | Met | [VERIFICATION.md](docs/VERIFICATION.md): Numeric comparison, equality and canonical hashing; Infinity and NaN |
 | Infinity and NaN | Met | [VERIFICATION.md](docs/VERIFICATION.md): Infinity and NaN |
 | Width conversion | Met | [VERIFICATION.md](docs/VERIFICATION.md): Fitting a coefficient; widening and narrowing rows of Exhaustive and differential evidence |

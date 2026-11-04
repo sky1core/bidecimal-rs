@@ -994,6 +994,121 @@ macro_rules! decimal_type {
                 Err(Error::InvalidInput)
             }
 
+            /// Removes trailing zeros from the fractional part of this value.
+            ///
+            /// Divides the coefficient by ten and increases the exponent
+            /// while the division is exact and the exponent is negative.
+            /// Thus `1.5000` becomes `1.5`, whereas `1500` and `0E+5`
+            /// retain their coefficient and exponent. A zero with a negative
+            /// exponent becomes a zero with exponent zero and the same sign.
+            ///
+            /// The result is exact, does not allocate or round, and cannot
+            /// fail. Infinity is unchanged. A quiet NaN keeps its sign and
+            /// payload; a signaling NaN becomes quiet with the same sign and
+            /// payload. Applying this method again leaves the bits unchanged.
+            /// Unlike [`stripped`](Self::stripped), this returns a decimal
+            /// value with changed representation rather than a formatting adapter.
+            ///
+            /// ```
+            /// use bidecimal::Decimal32;
+            /// let x = Decimal32::parse("1.5000")?;
+            /// assert_eq!(x.trim_fraction_zeros().to_string(), "1.5");
+            /// let integer = Decimal32::parse("1500")?;
+            /// assert_eq!(integer.trim_fraction_zeros().to_bits(), integer.to_bits());
+            /// let zero = Decimal32::parse("0E+5")?;
+            /// assert_eq!(zero.trim_fraction_zeros().to_bits(), zero.to_bits());
+            /// let snan = Decimal32::from_bits(0xfe00_0007)?;
+            /// assert_eq!(snan.trim_fraction_zeros().to_bits(), 0xfc00_0007);
+            /// # Ok::<(), bidecimal::Error>(())
+            /// ```
+            #[must_use]
+            pub fn trim_fraction_zeros(self) -> Self {
+                self.remove_trailing_zeros::<true>()
+            }
+
+            /// Removes trailing coefficient zeros, including integer zeros,
+            /// without exceeding [`MAX_EXP`](Self::MAX_EXP).
+            ///
+            /// Divides the nonzero coefficient by ten and increases the
+            /// exponent while the division is exact and the exponent is below
+            /// the upper bound. `1.5000` becomes `1.5`; `1500` becomes
+            /// coefficient 15 with exponent 2, still displayed as `1500`.
+            /// Every zero, including `0E+5`, becomes a zero with exponent zero
+            /// and the same sign. A nonzero result can still have trailing
+            /// coefficient zeros when its exponent has reached the upper bound.
+            ///
+            /// The result is exact, does not allocate or round, and cannot
+            /// fail. Infinity is unchanged. A quiet NaN keeps its sign and
+            /// payload; a signaling NaN becomes quiet with the same sign and
+            /// payload. Applying this method again leaves the bits unchanged.
+            /// Unlike [`stripped`](Self::stripped), this returns a decimal
+            /// value with changed representation rather than a formatting adapter.
+            ///
+            /// ```
+            /// use bidecimal::Decimal32;
+            /// assert_eq!(Decimal32::parse("1.5000")?.strip_trailing_zeros().to_string(), "1.5");
+            /// assert_eq!(Decimal32::parse("1500")?.strip_trailing_zeros().to_bits(),
+            ///            Decimal32::parse("15E+2")?.to_bits());
+            /// assert_eq!(Decimal32::parse("0E+5")?.strip_trailing_zeros().to_bits(),
+            ///            Decimal32::ZERO.to_bits());
+            /// let snan = Decimal32::from_bits(0xfe00_0007)?;
+            /// assert_eq!(snan.strip_trailing_zeros().to_bits(), 0xfc00_0007);
+            /// # Ok::<(), bidecimal::Error>(())
+            /// ```
+            #[must_use]
+            pub fn strip_trailing_zeros(self) -> Self {
+                self.remove_trailing_zeros::<false>()
+            }
+
+            #[expect(
+                clippy::arithmetic_side_effects,
+                reason = "finite decoded c < 10^P and qmin <= q <= qmax; the positive upper-q difference is at most 12287; narrow coefficients are < 10^16 < 2^63 and wide coefficients < 10^34 < 2^127, satisfying div_rem_pow10*; each exact division lowers c, removes at most P-1 <= 33 zeros, and increments q only up to the checked upper bound"
+            )]
+            fn remove_trailing_zeros<const FRACTIONAL_ONLY: bool>(self) -> Self {
+                if self.is_special() {
+                    // Clear only the signaling bit. It is already clear for
+                    // every canonical infinity and quiet NaN.
+                    return Self(self.0 & !Self::SIGNALING_BIT);
+                }
+                let mut value = self.unpack();
+                if value.coeff == 0 {
+                    if !FRACTIONAL_ONLY || value.exp < 0 {
+                        value.exp = 0;
+                    }
+                    return Self(layout::$encode(InRange::unchecked(value)));
+                }
+                let upper = if FRACTIONAL_ONLY { 0 } else { Self::MAX_EXP };
+                if value.exp >= upper {
+                    return self;
+                }
+                let mut remaining = (upper - value.exp) as u32;
+                if Self::DIGITS < 34 {
+                    let mut coeff = value.coeff as u64;
+                    remaining = remaining.min(coeff.trailing_zeros());
+                    while remaining != 0 {
+                        let (quotient, remainder) = kernel::div_rem_pow10_64(coeff, 1);
+                        if remainder != 0 {
+                            break;
+                        }
+                        coeff = quotient;
+                        value.exp += 1;
+                        remaining -= 1;
+                    }
+                    value.coeff = u128::from(coeff);
+                } else {
+                    while remaining != 0 {
+                        let (quotient, remainder) = kernel::div_rem_pow10(value.coeff, 1);
+                        if remainder != 0 {
+                            break;
+                        }
+                        value.coeff = quotient;
+                        value.exp += 1;
+                        remaining -= 1;
+                    }
+                }
+                Self(layout::$encode(InRange::unchecked(value)))
+            }
+
             /// Returns a formatting adapter that writes this value with
             /// trailing fractional zeros removed: `1.5000` as `1.5`, `2.000`
             /// as `2`.
