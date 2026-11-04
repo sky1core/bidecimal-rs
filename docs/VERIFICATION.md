@@ -192,11 +192,14 @@ Run the full test suite with Serde enabled:
 cargo test --locked --features serde
 ```
 
-To run only the Serde tests:
+To run only the tests whose names contain `serde`:
 
 ```sh
 cargo test --locked --features serde --lib serde
 ```
+
+This name filter skips Serde checks inside other test modules, such as the
+trailing-zero round trips; the full command above covers them.
 
 `src/serde_tests.rs` checks the public serde implementations for all three
 widths and their `OrderedDecimal` wrappers. Readable token tests compare
