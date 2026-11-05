@@ -144,7 +144,7 @@ the obligations without a direct machine proof are listed separately there.
 | Trailing-zero value transformations | Met | [VERIFICATION.md](docs/VERIFICATION.md#trailing-zero-value-transformations): contract, integer argument, independent-reference and exhaustive checks |
 | Comparison | Met | [VERIFICATION.md](docs/VERIFICATION.md): Numeric comparison, equality and canonical hashing; Infinity and NaN |
 | Infinity and NaN | Met | [VERIFICATION.md](docs/VERIFICATION.md): Infinity and NaN; binary conversion signed-special and payload-fit reference tests |
-| Binary floating-point conversion | Integer arguments, reference tests and stated exhaustive domains checked | [VERIFICATION.md](docs/VERIFICATION.md#binary-floating-point-conversion): manual bounds and checked premises, fixed-version core parser contract, independent-reference and exhaustive results |
+| Binary floating-point conversion | Manual bounds, independent-reference checks and stated exhaustive domains checked | [VERIFICATION.md](docs/VERIFICATION.md#binary-floating-point-conversion): certified integer and Clinger paths, direct limb rounding, exact-text parser contract, independent-reference and exhaustive results |
 | Binary conversion NaN mapping | Signed-special and payload-fit checks passed | [VERIFICATION.md](docs/VERIFICATION.md#binary-floating-point-conversion): signed quiet NaNs, payload fit and bit-transport limits |
 | Width conversion | Met | [VERIFICATION.md](docs/VERIFICATION.md): Fitting a coefficient; widening and narrowing rows of Exhaustive and differential evidence |
 | Parsing | Met | [VERIFICATION.md](docs/VERIFICATION.md): String parsing |

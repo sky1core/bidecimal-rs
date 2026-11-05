@@ -1185,9 +1185,7 @@ fn binary_float_integer_argument_premises() {
     for _ in 0..=1074 {
         assert!(expanded < BigUint::from(10_u8).pow(767));
         let digits = expanded.to_str_radix(10).len();
-        for capacity in [86 * 9, 800] {
-            assert!(digits <= capacity);
-        }
+        assert!(digits <= 86 * 9);
         expanded *= 5_u8;
     }
     expanded = max_significand;
@@ -1196,16 +1194,14 @@ fn binary_float_integer_argument_premises() {
         expanded *= 2_u8;
     }
 
-    // All factors the chunk loops can select; maximal limb and carry bound
-    // every smaller pair, and division by the radix preserves carry<factor.
-    let factors = (0..=12)
+    let factors = (0..=27)
         .map(|k| 5_u64.pow(k))
-        .chain((0..=29).map(|k| 1_u64 << k));
+        .chain((0..=63).map(|k| 1_u64 << k));
     for factor in factors {
-        assert!(factor <= 1 << 29);
-        let product = (1_000_000_000_u64 - 1) * factor + (factor - 1);
-        assert!(product < 1 << 59);
-        assert!(product / 1_000_000_000 < factor);
+        assert!(factor <= 1 << 63);
+        let product = (1_000_000_000_u128 - 1) * u128::from(factor) + u128::from(factor - 1);
+        assert!(product < 1_u128 << 93);
+        assert!(product / 1_000_000_000 < u128::from(factor));
         assert!(product % 1_000_000_000 < 1_000_000_000);
     }
 
@@ -1274,6 +1270,112 @@ fn binary_float_integer_argument_premises() {
                     increment,
                     remainder > 50 || (remainder == 50 && parity != 0)
                 );
+            }
+        }
+    }
+}
+
+#[test]
+fn binary_float_clinger_boundaries_and_generated_tables() {
+    for (limit, max_power) in [(1_u128 << 53, 22_i32), (1_u128 << 24, 10)] {
+        for coeff in [limit - 1, limit, limit + 1] {
+            for exp in [
+                -max_power - 1,
+                -max_power,
+                -1,
+                0,
+                1,
+                max_power,
+                max_power + 1,
+            ] {
+                for format in FORMATS {
+                    if coeff >= 10_u128.pow(bounds(format).0) {
+                        continue;
+                    }
+                    for neg in [false, true] {
+                        check_to(Finite { neg, coeff, exp }, format);
+                    }
+                }
+            }
+        }
+    }
+    for coeff in [
+        u128::from(u64::MAX) - 1,
+        u128::from(u64::MAX),
+        u128::from(u64::MAX) + 1,
+    ] {
+        for exp in [-28, -27, -26, -18, -17, -16, -11, -10, -1, 0, 1] {
+            for neg in [false, true] {
+                check_to(Finite { neg, coeff, exp }, Format::D128);
+            }
+        }
+    }
+    let mut power = BigUint::from(1_u8);
+    for &actual in &crate::tables::BINARY_POW5 {
+        assert_eq!(BigUint::from(actual), power);
+        power *= 5_u8;
+    }
+    for (k, &actual) in crate::tables::F64_POW10.iter().enumerate() {
+        let exact = BigUint::from(10_u8).pow(k as u32);
+        let rational = binary_finite(actual.to_bits(), F64);
+        assert_eq!(rational.n, exact * rational.d);
+    }
+    for (k, &actual) in crate::tables::F32_POW10.iter().enumerate() {
+        let exact = BigUint::from(10_u8).pow(k as u32);
+        let rational = binary_finite(u64::from(actual.to_bits()), F32);
+        assert_eq!(rational.n, exact * rational.d);
+    }
+}
+
+#[test]
+fn binary_float_fixed_width_and_chunk_transition_boundaries() {
+    for binary in [F32, F64] {
+        for width in 1..=binary.fraction + 1 {
+            let m = (1_u64 << width) - 1;
+            let shift = (binary.fraction + 1 - width) as i32;
+            let fixed_limit = 128 - width as i32;
+            let negative_limit = (0..=55)
+                .take_while(|&k| width + 5_u128.pow(k).bit_width() <= 128)
+                .last()
+                .unwrap() as i32;
+            for exponent in [
+                fixed_limit - 1,
+                fixed_limit,
+                fixed_limit + 1,
+                -negative_limit - 1,
+                -negative_limit,
+                -negative_limit + 1,
+                -56,
+                -55,
+                -54,
+                -109,
+                -108,
+                -107,
+                -82,
+                -81,
+                -80,
+                125 + shift,
+                126 + shift,
+                127 + shift,
+                188 + shift,
+                189 + shift,
+                190 + shift,
+            ] {
+                let center = reference_to_rational(&Rational::dyadic(m, exponent), false, binary);
+                if center == 0 || center >= binary.infinity() {
+                    continue;
+                }
+                for magnitude in center - 1..=center + 1 {
+                    for neg in [false, true] {
+                        for format in FORMATS {
+                            check_from(
+                                magnitude | if neg { binary.sign() } else { 0 },
+                                binary,
+                                format,
+                            );
+                        }
+                    }
+                }
             }
         }
     }

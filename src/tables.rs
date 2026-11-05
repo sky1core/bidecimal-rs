@@ -483,3 +483,52 @@ pub(crate) const fn pow10_64(k: u32) -> u64 {
 pub(crate) const fn recip_64(k: u32) -> Recip64 {
     RECIP_64[(k - 1) as usize]
 }
+
+pub(crate) const BINARY_POW5: [u128; 56] = build_binary_pow5();
+pub(crate) const F64_POW10: [f64; 23] = build_f64_pow10();
+pub(crate) const F32_POW10: [f32; 11] = build_f32_pow10();
+
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "i is in 1..56 and 5^55 < 2^128; the integer recurrence produces each exact entry"
+)]
+const fn build_binary_pow5() -> [u128; 56] {
+    let mut table = [1; 56];
+    let mut i = 1;
+    while i < table.len() {
+        table[i] = table[i - 1] * 5;
+        i += 1;
+    }
+    table
+}
+
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "i<23 and 10^22 fits u128 and f64 exactly because 5^22<2^53; each entry comes from the existing integer table"
+)]
+const fn build_f64_pow10() -> [f64; 23] {
+    let mut table = [0.0; 23];
+    let mut i = 0;
+    while i < table.len() {
+        table[i] = pow10(i as u32) as f64;
+        i += 1;
+    }
+    table
+}
+
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "i<11 and 10^10 fits u64 and f32 exactly because 5^10<2^24; each entry comes from the existing integer table"
+)]
+const fn build_f32_pow10() -> [f32; 11] {
+    let mut table = [0.0; 11];
+    let mut i = 0;
+    while i < table.len() {
+        table[i] = pow10_64(i as u32) as f32;
+        i += 1;
+    }
+    table
+}

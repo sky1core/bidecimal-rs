@@ -264,8 +264,7 @@ from_f32(value: f32) -> Self
 They return values, not `Result` or `Option`, and expose no status flags or
 rounding argument. They add no `From`, `Into`, `TryFrom`, or numeric-trait
 implementations. They are manually written safe Rust, require neither
-allocation nor a new dependency, and retain `no_std`. `to_f64` and `to_f32`
-pass exact decimal text to the core floating-point parser for binary rounding.
+allocation nor a new dependency, and retain `no_std`.
 
 For a finite decimal input, `to_f64` and `to_f32` round the exact value
 `sign * coefficient * 10^exponent` once to the destination binary format,
