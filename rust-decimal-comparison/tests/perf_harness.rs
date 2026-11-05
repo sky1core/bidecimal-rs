@@ -216,3 +216,200 @@ mod paths;
 fn workload_covers_digit_lengths_and_numeric_cohorts() {
     paths::check_workload_coverage();
 }
+
+#[test]
+fn binary_oracle_rounding_cohorts_and_range() {
+    use support::{Bid, BinaryDecimal, binary_decimal, verify_binary_decimal};
+    for (input, width, coeff, exp) in [
+        (0.1_f64, 64, 1, -1),
+        (1.5, 128, 15, -1),
+        (123456650.0, 32, 1234566, 2),
+        (123456750.0, 32, 1234568, 2),
+        (999999950.0, 32, 1000000, 3),
+        (2_f64.powi(80), 64, 120892581961463, 10),
+        (1e96, 32, 1000000, 90),
+        (1e-101, 32, 1, -101),
+        (f64::from_bits(1), 32, 0, 0),
+        (f64::from_bits(1), 64, 494065645841247, -338),
+        (42.0, 128, 42, 0),
+        (0.0, 32, 0, 0),
+    ] {
+        for sign in [1.0_f64, -1.0] {
+            let input = input * sign;
+            let expected = BinaryDecimal::Finite(Bid {
+                negative: sign.is_sign_negative(),
+                coeff,
+                exp,
+            });
+            assert_eq!(binary_decimal(input.to_bits(), 64, width), expected);
+            let bits = match width {
+                32 => bidecimal::Decimal32::from_f64(input).to_bits() as u128,
+                64 => bidecimal::Decimal64::from_f64(input).to_bits() as u128,
+                128 => bidecimal::Decimal128::from_f64(input).to_bits(),
+                _ => unreachable!(),
+            };
+            verify_binary_decimal(bits, width, &expected);
+        }
+    }
+    for (input, coeff, exp) in [
+        (1234565_f32, 123456, 1),
+        (1234575_f32, 123458, 1),
+        (f32::from_bits(1), 14013, -49),
+    ] {
+        for width in [32, 64, 128] {
+            assert_eq!(
+                binary_decimal(input.to_bits() as u64, 32, width),
+                BinaryDecimal::Finite(Bid {
+                    negative: false,
+                    coeff,
+                    exp
+                })
+            );
+        }
+    }
+    for input in [1e97_f64, f64::INFINITY, -1e97, f64::NEG_INFINITY] {
+        let expected = BinaryDecimal::Infinity {
+            negative: input.is_sign_negative(),
+        };
+        assert_eq!(binary_decimal(input.to_bits(), 64, 32), expected);
+        verify_binary_decimal(
+            bidecimal::Decimal32::from_f64(input).to_bits() as u128,
+            32,
+            &expected,
+        );
+    }
+}
+
+#[test]
+fn float_fixtures_are_exact_and_binary_rounding_is_direct() {
+    macro_rules! width {
+        ($ty:ty, $width:literal) => {
+            for (_, text) in paths::float_inputs($width) {
+                let value = <$ty>::parse(text).unwrap();
+                assert_eq!(value.exact(), Some(Exact::parse(text)));
+                assert_eq!(value.to_f64().to_bits(), support::decimal_binary(text, 64));
+                assert_eq!(
+                    value.to_f32().to_bits(),
+                    support::decimal_binary(text, 32) as u32
+                );
+            }
+        };
+    }
+    width!(bidecimal::Decimal32, 32);
+    width!(bidecimal::Decimal64, 64);
+    width!(bidecimal::Decimal128, 128);
+    let text = "1.000000059604644775390625000000001";
+    assert_eq!(support::decimal_binary(text, 32), 0x3f800001);
+    assert_eq!(
+        (f64::from_bits(support::decimal_binary(text, 64)) as f32).to_bits(),
+        0x3f800000
+    );
+    assert!(!support::rust_decimal_exact(
+        None,
+        &support::binary_decimal(0.1_f64.to_bits(), 64, 64)
+    ));
+}
+
+#[test]
+fn decimal_binary_oracle_midpoints_neighbors_and_range() {
+    for (width, fraction, bias, infinity) in [
+        (32, 23, 127, 0x7f800000_u64),
+        (64, 52, 1023, 0x7ff0000000000000),
+    ] {
+        let one = (bias as u64) << fraction;
+        let min_power = 1 - bias - fraction;
+        for (numerator, power, lower, upper) in [
+            (1, min_power - 1, 0, 1),
+            (3, min_power - 1, 1, 2),
+            (
+                (1_u64 << (fraction + 1)) - 1,
+                min_power - 1,
+                (1 << fraction) - 1,
+                1 << fraction,
+            ),
+            ((1 << (fraction + 1)) + 1, -fraction - 1, one, one + 1),
+            ((1 << (fraction + 1)) + 3, -fraction - 1, one + 1, one + 2),
+            (
+                (1 << (fraction + 2)) - 1,
+                bias - fraction - 1,
+                infinity - 1,
+                infinity,
+            ),
+        ] {
+            let (coeff, exp) = if power < 0 {
+                (
+                    BigInt::from(numerator) * BigInt::from(5).pow((-power) as u32),
+                    power,
+                )
+            } else {
+                (BigInt::from(numerator) << power as usize, 0)
+            };
+            for (delta, expected) in [
+                (-1, lower),
+                (0, if lower & 1 == 0 { lower } else { upper }),
+                (1, upper),
+            ] {
+                for negative in [false, true] {
+                    let text = format!(
+                        "{}{}e{exp}",
+                        if negative { "-" } else { "" },
+                        &coeff + delta
+                    );
+                    assert_eq!(
+                        support::decimal_binary(&text, width),
+                        expected | (u64::from(negative) << (width - 1)),
+                        "{text} width={width}"
+                    );
+                }
+            }
+        }
+        for text in ["0", "-0", "0e-6176", "-0e6111"] {
+            assert_eq!(
+                support::decimal_binary(text, width),
+                u64::from(text.starts_with('-')) << (width - 1)
+            );
+        }
+        for (text, bits) in [("1e-6176", 0), ("1e6144", infinity), ("1", one)] {
+            assert_eq!(support::decimal_binary(text, width), bits);
+        }
+    }
+}
+
+#[test]
+fn decimal_to_binary_product_zero_subnormal_and_overflow_boundaries() {
+    for (width, text, expected) in [
+        (32, "0", 0_u64),
+        (64, "0", 0),
+        (32, "7.00649232162408535461864791644958e-46", 0),
+        (32, "7.00649232162408535461864791644959e-46", 1),
+        (32, "1.401298464324817070923729583289916e-45", 1),
+        (32, "3.402823567797336616375393954581425e38", 0x7f7fffff),
+        (32, "3.402823567797336616375393954581426e38", 0x7f800000),
+        (64, "2.470328229206232720882843964341106e-324", 0),
+        (64, "2.470328229206232720882843964341107e-324", 1),
+        (64, "4.940656458412465441765687928682214e-324", 1),
+        (
+            64,
+            "1.797693134862315807937289714053034e308",
+            0x7fefffffffffffff,
+        ),
+        (
+            64,
+            "1.797693134862315807937289714053035e308",
+            0x7ff0000000000000,
+        ),
+    ] {
+        for negative in [false, true] {
+            let text = format!("{}{text}", if negative { "-" } else { "" });
+            let expected = expected | (u64::from(negative) << (width - 1));
+            assert_eq!(support::decimal_binary(&text, width), expected);
+            let value = bidecimal::Decimal128::parse(&text).unwrap();
+            let actual = if width == 32 {
+                value.to_f32().to_bits() as u64
+            } else {
+                value.to_f64().to_bits()
+            };
+            assert_eq!(actual, expected, "{text} width={width}");
+        }
+    }
+}

@@ -1,7 +1,10 @@
 use bidecimal::{Decimal32, Decimal64, Decimal128, Rounding};
 use core::fmt::{self, Write};
 use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
-use rust_decimal::{Decimal, RoundingStrategy};
+use rust_decimal::{
+    Decimal, RoundingStrategy,
+    prelude::{FromPrimitive, ToPrimitive},
+};
 use std::{
     collections::VecDeque,
     hint::black_box,
@@ -231,6 +234,30 @@ fn paired<A, B, O, P>(
     );
     assert_eq!(a.len() + outside.len() + mismatches.len(), source.len());
     assert!(!a.is_empty());
+    measure_pair(c, name, &a, &b, &ours, baseline);
+    if !outside.is_empty() {
+        let mut group = c.benchmark_group(format!("wide_{name}"));
+        group.sampling_mode(SamplingMode::Flat);
+        group.throughput(Throughput::Elements(outside.len() as u64));
+        group.bench_function("bidecimal", |bencher| {
+            bencher.iter(|| {
+                for input in &outside {
+                    black_box(ours(black_box(input)));
+                }
+            })
+        });
+        group.finish();
+    }
+}
+
+fn measure_pair<A, B, O, P>(
+    c: &mut Criterion,
+    name: &str,
+    a: &[A],
+    b: &[B],
+    ours: impl Fn(&A) -> O,
+    baseline: impl Fn(&B) -> P,
+) {
     let mut group = c.benchmark_group(name);
     group.throughput(Throughput::Elements(a.len() as u64));
     group.sampling_mode(SamplingMode::Flat);
@@ -243,11 +270,11 @@ fn paired<A, B, O, P>(
             let mut baseline_next = baseline_first;
             for _ in 0..iterations {
                 if baseline_next {
-                    baseline_time += time_set(&b, &baseline);
-                    ours_time += time_set(&a, &ours);
+                    baseline_time += time_set(b, &baseline);
+                    ours_time += time_set(a, &ours);
                 } else {
-                    ours_time += time_set(&a, &ours);
-                    baseline_time += time_set(&b, &baseline);
+                    ours_time += time_set(a, &ours);
+                    baseline_time += time_set(b, &baseline);
                 }
                 baseline_next = !baseline_next;
             }
@@ -282,19 +309,6 @@ fn paired<A, B, O, P>(
             ),
         )
         .unwrap();
-    }
-    if !outside.is_empty() {
-        let mut group = c.benchmark_group(format!("wide_{name}"));
-        group.sampling_mode(SamplingMode::Flat);
-        group.throughput(Throughput::Elements(outside.len() as u64));
-        group.bench_function("bidecimal", |bencher| {
-            bencher.iter(|| {
-                for input in &outside {
-                    black_box(ours(black_box(input)));
-                }
-            })
-        });
-        group.finish();
     }
 }
 
@@ -512,9 +526,160 @@ fn paths(c: &mut Criterion) {
     comparison!("128", Decimal128, c, d);
 }
 
+const FLOAT_COUNT: usize = 256;
+
+pub fn float_inputs(width: u32) -> Vec<(&'static str, &'static str)> {
+    let mut inputs = vec![
+        ("short01", "0.1"),
+        ("short15", "1.5"),
+        ("short12345", "123.45"),
+        ("integer", "42"),
+        ("tiny", "1e-28"),
+        ("huge", "1e28"),
+    ];
+    if width >= 64 {
+        inputs.extend([
+            ("digits15", "1.23456789012345"),
+            ("digits16", "1.234567890123456"),
+        ]);
+    }
+    if width == 128 {
+        inputs.extend([
+            ("digits34", "1.234567890123456789012345678901234"),
+            ("f32_double_round", "1.000000059604644775390625001"),
+            ("f32_midpoint", "1.000000059604644775390625000000001"),
+        ]);
+    }
+    inputs.extend(match width {
+        32 => [("range_tiny", "1e-101"), ("range_huge", "9.999999e96")],
+        64 => [
+            ("range_tiny", "1e-398"),
+            ("range_huge", "9.999999999999999e384"),
+        ],
+        128 => [
+            ("range_tiny", "1e-6176"),
+            ("range_huge", "9.999999999999999999999999999999999e6144"),
+        ],
+        _ => panic!("unsupported decimal width"),
+    });
+    inputs
+}
+
+fn conversion<A: Clone, B: Clone, O, P>(
+    c: &mut Criterion,
+    name: &str,
+    input: A,
+    baseline: Option<B>,
+    ours: impl Fn(&A) -> O,
+    base: impl Fn(&B) -> P,
+    exact: Option<bool>,
+) {
+    let a = vec![input; FLOAT_COUNT];
+    let paired = baseline.is_some();
+    println!(
+        "CHECK {name}: generated={FLOAT_COUNT} inside={} comparison={} standalone={} differing=0",
+        if paired { FLOAT_COUNT } else { 0 },
+        if paired { FLOAT_COUNT } else { 0 },
+        if paired { 0 } else { FLOAT_COUNT },
+    );
+    println!(
+        "ACCURACY {name}: rust_decimal_status={}",
+        match exact {
+            Some(true) => "exact",
+            Some(false) => "inexact",
+            None => "unavailable",
+        }
+    );
+    if let Some(baseline) = baseline {
+        measure_pair(c, name, &a, &vec![baseline; FLOAT_COUNT], ours, base);
+    } else {
+        let mut group = c.benchmark_group(format!("wide_{name}"));
+        group.sampling_mode(SamplingMode::Flat);
+        group.throughput(Throughput::Elements(FLOAT_COUNT as u64));
+        group.bench_function("bidecimal", |bencher| {
+            bencher.iter(|| {
+                for input in &a {
+                    black_box(ours(black_box(input)));
+                }
+            });
+        });
+        group.finish();
+    }
+}
+
+fn float_paths(c: &mut Criterion) {
+    macro_rules! width {
+        ($ty:ty, $width:literal) => {{
+            for (fixture, text) in float_inputs($width) {
+                let value = <$ty>::parse(text).unwrap();
+                assert_eq!(value.exact(), Some(Exact::parse(text)));
+                let base = Decimal::from_str(text).ok().filter(|v| v.exact() == value.exact());
+                println!("FLOAT_INPUT width={} fixture={fixture} decimal={text}", $width);
+                macro_rules! to_binary {
+                    ($binary_width:literal, $method:ident) => {{
+                        let expected = support::decimal_binary(text, $binary_width);
+                        assert_eq!(value.$method().to_bits() as u64, expected);
+                        let exact = base.and_then(|v| v.$method()).map(|v| v.to_bits() as u64 == expected);
+                        conversion(c, &format!("float_{}_{}_{fixture}", stringify!($method), $width),
+                            value, base, |v| v.$method(), |v| v.$method(), exact);
+                    }};
+                }
+                to_binary!(64, to_f64);
+                to_binary!(32, to_f32);
+                let name = format!("float_core_parse_f64_{}_{fixture}", $width);
+                let (coeff, exp) = value.to_coefficient_and_exponent().unwrap();
+                let identical_text = format!("{}{}e{exp}",
+                    if value.is_sign_negative() { "-" } else { "" }, coeff.unsigned_abs());
+                assert_eq!(identical_text.parse::<f64>().unwrap().to_bits(), support::decimal_binary(text, 64));
+                println!("CORE {name}: generated={FLOAT_COUNT} input={identical_text} baseline=identical-text-core-parse");
+                let prepared = vec![identical_text; FLOAT_COUNT];
+                let mut group = c.benchmark_group(name);
+                group.sampling_mode(SamplingMode::Flat);
+                group.throughput(Throughput::Elements(FLOAT_COUNT as u64));
+                group.bench_function("core", |bencher| {
+                    bencher.iter(|| {
+                        for text in &prepared {
+                            black_box(black_box(text.as_str()).parse::<f64>().unwrap());
+                        }
+                    });
+                });
+                group.finish();
+            }
+            macro_rules! from_binary {
+                ($binary:ty, $binary_width:literal, $method:ident, $base_method:ident) => {{
+                    let mut inputs: Vec<_> = float_inputs($width).into_iter()
+                        .map(|(name, text)| (name, text.parse::<$binary>().unwrap())).collect();
+                    inputs.extend([
+                        ("subnormal", <$binary>::from_bits(1)),
+                        ("power2", (2 as $binary).powi(80)),
+                    ]);
+                    for (fixture, input) in inputs {
+                        let expected = support::binary_decimal(input.to_bits() as u64, $binary_width, $width);
+                        let ours = <$ty>::$method(input);
+                        support::verify_binary_decimal(ours.to_bits() as u128, $width, &expected);
+                        let base = Decimal::$base_method(input);
+                        let name = format!("float_{}_{}_{fixture}", stringify!($base_method), $width);
+                        println!("FLOAT_INPUT path={name} binary_bits={:#x} binary={input:?} rust_decimal_available={}",
+                            input.to_bits(), base.is_some());
+                        conversion(c, &name, input, Some(input),
+                            |&v| <$ty>::$method(v), |&v| Decimal::$base_method(v),
+                            base.map(|v| support::rust_decimal_exact(Some(v), &expected)));
+                    }
+                }};
+            }
+            from_binary!(f64, 64, from_f64, from_f64);
+            from_binary!(f64, 64, from_f64, from_f64_retain);
+            from_binary!(f32, 32, from_f32, from_f32);
+        }};
+    }
+    width!(Decimal32, 32);
+    width!(Decimal64, 64);
+    width!(Decimal128, 128);
+}
+
 criterion_group! { name = benches; config = Criterion::default()
 .warm_up_time(Duration::from_secs(2)).measurement_time(Duration::from_secs(5)).sample_size(100);
-targets = paths }
+targets = paths, float_paths }
 criterion_main!(benches);
 
 #[cfg(test)]

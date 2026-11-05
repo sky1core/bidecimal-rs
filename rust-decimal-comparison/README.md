@@ -25,7 +25,7 @@ reference measurement and not part of the specification.
 | Ratio | bidecimal median / rust_decimal median |
 | Load wait | Before each session, poll the 1-minute load average every 5 s until it is below 1.0, for at most `--max-wait-seconds` (default 120; 0 allowed) |
 | Load record | Waited seconds and the 1-minute load at session start and end are recorded; a session starting at load >= 1.0 is preliminary |
-| Build environment | The runner refuses to run when any of CARGO, RUSTC, RUSTC_BOOTSTRAP, RUSTC_WORKSPACE_WRAPPER, RUSTC_WRAPPER, RUSTDOC, RUSTDOCFLAGS or RUSTFLAGS is set (even empty), when any CARGO_* variable is set other than CARGO_HOME, CARGO_TARGET_DIR, CARGO_BUILD_TARGET_DIR, CARGO_BUILD_BUILD_DIR, CARGO_LOG, CARGO_CACHE_RUSTC_INFO, CARGO_CACHE_AUTO_CLEAN_FREQUENCY, CARGO_FUTURE_INCOMPAT_REPORT_FREQUENCY and the CARGO_TERM_*, CARGO_HTTP_*, CARGO_NET_*, CARGO_ALIAS_*, CARGO_CREDENTIAL_ALIAS_*, CARGO_REGISTRY_* and CARGO_REGISTRIES_* groups, or when `.cargo/config.toml` or `.cargo/config` in the working directory or any ancestor directory, or `config.toml` or `config` in the Cargo home (CARGO_HOME when set and non-empty, otherwise `.cargo` in the home directory), sets anything other than `build.build-dir`, `build.target-dir` and the `alias`, `cache`, `credential-alias`, `future-incompat-report`, `http`, `net`, `registries`, `registry` and `term` tables, or has a line the runner does not read: a multi-line string, an array of tables, a quoted key where the setting is decided, or a line that is neither a table header nor a key; these checks are recorded. The benchmark build passes no `--target`, so with these checks the recorded Target is the host of the pinned rustc |
+| Build environment | The runner refuses to run when any of CARGO, RUSTC, RUSTC_BOOTSTRAP, RUSTC_WORKSPACE_WRAPPER, RUSTC_WRAPPER, RUSTDOC, RUSTDOCFLAGS or RUSTFLAGS is set (even empty), when any CARGO_* variable is set other than CARGO_BUILD_JOBS, CARGO_HOME, CARGO_TARGET_DIR, CARGO_BUILD_TARGET_DIR, CARGO_BUILD_BUILD_DIR, CARGO_LOG, CARGO_CACHE_RUSTC_INFO, CARGO_CACHE_AUTO_CLEAN_FREQUENCY, CARGO_FUTURE_INCOMPAT_REPORT_FREQUENCY and the CARGO_TERM_*, CARGO_HTTP_*, CARGO_NET_*, CARGO_ALIAS_*, CARGO_CREDENTIAL_ALIAS_*, CARGO_REGISTRY_* and CARGO_REGISTRIES_* groups, or when `.cargo/config.toml` or `.cargo/config` in the working directory or any ancestor directory, or `config.toml` or `config` in the Cargo home (CARGO_HOME when set and non-empty, otherwise `.cargo` in the home directory), sets anything other than `build.build-dir`, `build.target-dir` and the `alias`, `cache`, `credential-alias`, `future-incompat-report`, `http`, `net`, `registries`, `registry` and `term` tables, or has a line the runner does not read: a multi-line string, an array of tables, a quoted key where the setting is decided, or a line that is neither a table header nor a key; these checks are recorded. The benchmark build passes no `--target`, so with these checks the recorded Target is the host of the pinned rustc |
 | Output | A new output directory per run: preflight output, per-session full output, raw criterion and paired JSON, removed inputs per path, metadata, report; the source fingerprint is compared between sessions |
 
 ## Workload
@@ -71,7 +71,86 @@ reference measurement and not part of the specification.
 | quantize_floor / quantize_ceil | Decimal128::quantize(-2, direction) | round_dp_with_strategy(2, ToNegativeInfinity / ToPositiveInfinity) |
 | cmp64 / cmp128 | partial_cmp, mapping Less/Equal/Greater to -1/0/1 and unordered to 2 | cmp as i8 |
 | eq64 / eq128 | == | == |
-| wide_* | The outside set of the path | — |
+| wide_* | The outside set of the path; reported as `not-compared` because it is outside the comparison policy, not as unrepresentable in rust_decimal | — |
+
+## Binary floating-point conversion
+
+These paths use fixed individual fixtures, not the generated arithmetic workload.
+Each path measures a batch of 256 copies of one prepared input, with the same
+paired timers, order alternation, sinks and sample statistics as above. The
+`float_` filter selects all new paths, including `wide_float_*` and the core
+parser baseline. The normal runner also includes them and preserves their
+`FLOAT_INPUT` and `ACCURACY` records in its report.
+
+| Path (W = 32, 64, 128; F = fixture) | bidecimal | Baseline |
+|---|---|---|
+| float_to_f64_W_F / float_to_f32_W_F | DecimalW::to_f64 / to_f32 | rust_decimal ToPrimitive::to_f64 / to_f32 |
+| float_from_f64_W_F | DecimalW::from_f64 | rust_decimal FromPrimitive::from_f64 |
+| float_from_f64_retain_W_F | DecimalW::from_f64 | rust_decimal Decimal::from_f64_retain |
+| float_from_f32_W_F | DecimalW::from_f32 | rust_decimal FromPrimitive::from_f32 |
+| float_core_parse_f64_W_F/core | — | core str::parse::<f64> on the same `{coefficient}e{exponent}` text that the current to_f64 builds, prepared before timing; parse cost only |
+| wide_float_to_* | Decimal input not exactly representable by rust_decimal; bidecimal alone | — |
+
+| Fixtures | Exact decimal text |
+|---|---|
+| All widths | short01 = 0.1, short15 = 1.5, short12345 = 123.45, integer = 42, tiny = 1e-28, huge = 1e28 |
+| Decimal64 and Decimal128 | digits15 = 1.23456789012345, digits16 = 1.234567890123456 |
+| Decimal128 only | digits34 = 1.234567890123456789012345678901234; f32_double_round = 1.000000059604644775390625001; f32_midpoint = 1.000000059604644775390625000000001 |
+| range_tiny, by width | 1e-101, 1e-398, 1e-6176 |
+| range_huge, by width | 9.999999e96, 9.999999999999999e384, 9.999999999999999999999999999999999e6144 |
+| Additional binary inputs | subnormal = from_bits(1), power2 = 2^80, separately for f64 and f32 |
+
+All decimal fixtures parse exactly in the designated width. Binary inputs are
+parsed directly as f64/f32 from those same decimal strings, plus the two binary
+fixtures. The range extremes can become signed zero or infinity in the binary
+source; `FLOAT_INPUT` records the actual bits and value, so these are special
+value paths rather than finite conversions. Input parsing, text construction,
+BID decoding, BigInt calculations and all accuracy checks are outside timers.
+
+Before timing, every bidecimal result must equal an independent oracle:
+`to_*` compares bits with a num-bigint rational rounding of the exact decimal
+value (neighbor and midpoint comparison with nearest-even, binary32 computed
+directly, including subnormal and overflow to infinity), independent of the core
+float parser; `from_*` reconstructs the exact binary rational
+using num-bigint and applies the SPEC significant-digit limit, one nearest-even
+rounding including the minimum exponent, exponent fitting and fractional-zero
+trimming. It checks the result's coefficient, exponent and sign through the
+independent BID decoder, or the infinity bits. Tests include decimal ties,
+carry, signed zero, subnormal, underflow and overflow cases.
+
+For conversions only, rust_decimal inexact results **remain timed**.
+`ACCURACY rust_decimal_status=exact|inexact|unavailable` records the result.
+`exact` means equality to the correctly rounded binary bits for `to_*`, or
+numeric equality to the SPEC-rounded destination value for `from_*` (including
+zero sign). `from_f64_retain` deliberately has a different precision policy.
+For `to_*`, `unavailable` means the decimal source cannot be represented exactly
+in rust_decimal, so only bidecimal is timed and no ratio is reported. For
+`from_*`, `unavailable` means rust_decimal returned `None` (the adjacent
+`FLOAT_INPUT ... rust_decimal_available=false` record shows it); that call is
+still timed and its ratio row is marked **different-policy**, like `inexact`.
+In 1.43.0 the trait's default `to_f32` converts through `to_f64`; it is still
+the public path measured here. An accuracy note must accompany speed ratios.
+
+A short single-session observation, with two build jobs and only these paths:
+
+```sh
+export CARGO_BUILD_JOBS=2
+channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' ../rust-toolchain.toml)
+mkdir -p target/float-short/raw
+PERF_RAW_DIR=target/float-short/raw CRITERION_HOME=target/float-short/criterion \
+  rustup run "$channel" cargo bench --locked --offline --bench paths -- \
+  float_ --warm-up-time 0.05 --measurement-time 0.1 --sample-size 10 \
+  --nresamples 1000 --noplot
+```
+
+Use a new output directory each time. Record date, commit, CPU, rustc version
+and start/end 1-minute load with the output. Ten sample batch means and one
+session are preliminary, especially on aarch64 macOS; they do not satisfy the
+three-session protocol. The runner's fixed 100-sample cross-check applies to
+normal runs, not this short invocation. The paired raw buffer keeps up to 100 calls; with fewer than 100 samples it
+also contains warm-up calls. Select its final `sample.json` sample count and
+cross-check iteration identity and summed side times before computing short-run
+statistics. Criterion `sample.json` itself contains only measured samples.
 
 ## Reproduction
 
@@ -98,6 +177,6 @@ refused for either profile.
 
 | Self-test | Coverage |
 |---|---|
-| perf_harness | The partition predicate against an enumeration of E = -28..=0 on 27/28/29 digits, E = -29/-28/0/1, trailing zeros, zero, both signs, and 20,000 random values; expected results and inside checks; the BID decoder on boundary encodings of all widths (sign, both combination-field forms, exponent, coefficient); workload digit and cohort coverage |
+| perf_harness | The partition predicate against an enumeration of E = -28..=0 on 27/28/29 digits, E = -29/-28/0/1, trailing zeros, zero, both signs, and 20,000 random values; expected results and inside checks; the BID decoder on boundary encodings of all widths (sign, both combination-field forms, exponent, coefficient); workload digit and cohort coverage; binary conversion oracle ties, carry, exponent fitting, sign, range and direct binary32 rounding |
 | perf-self-tests | Paired median/min/nearest-rank p95/ratio and diagnostics on synthetic raw JSON; preliminary boundary; iteration identity, time sum differing from the criterion sample time, invalid samples; lockstep 1.7x half-step without instability; ratio half-steps at exactly ±10%, the adjacent representable values just below and above the boundary; unequal slow fractions with stable ratio without instability; ratio half-change and nearest-rank IQR/median; paired file aggregation and wide_* criterion estimate mismatch; refusal of a toolchain mismatch, of each refused build environment variable and of a Cargo configuration file with a build setting in the working directory, an ancestor directory or the Cargo home, acceptance of one with only allowed settings; allowed, refused and unread Cargo configuration lines; Cargo configuration probing order, Cargo home resolution and metadata check rows naming every checked variable and file; load wait and timeout, CLI defaults and profile selection/refusal, fixture cleanup |
 | paths --test | criterion test mode; preflight of the comparison and outside sets of every path |

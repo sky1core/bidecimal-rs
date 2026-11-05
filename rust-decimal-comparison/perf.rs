@@ -333,7 +333,13 @@ fn preliminary(loads: &[f64]) -> Result<bool> {
 
 fn workload_lines(log: &str) -> Vec<&str> {
     log.lines()
-        .filter(|s| s.starts_with("CHECK ") || s.starts_with("WORKLOAD "))
+        .filter(|s| {
+            s.starts_with("CHECK ")
+                || s.starts_with("WORKLOAD ")
+                || s.starts_with("ACCURACY ")
+                || s.starts_with("CORE ")
+                || s.starts_with("FLOAT_INPUT ")
+        })
         .collect()
 }
 
@@ -352,13 +358,16 @@ fn expected_functions(log: &str) -> Result<BTreeMap<(String, String), usize>> {
         };
         let inside = count("comparison")?;
         let outside = count("standalone")?;
-        if inside == 0
+        if inside + outside == 0
             || inside + outside + count("differing")? != count("generated")?
             || count("inside")? != inside + count("differing")?
         {
             return Err("invalid workload partition".into());
         }
-        for implementation in ["bidecimal", "rust_decimal"] {
+        for implementation in ["bidecimal", "rust_decimal"]
+            .into_iter()
+            .filter(|_| inside > 0)
+        {
             if functions
                 .insert((name.to_owned(), implementation.to_owned()), inside)
                 .is_some()
@@ -370,10 +379,88 @@ fn expected_functions(log: &str) -> Result<BTreeMap<(String, String), usize>> {
             functions.insert((format!("wide_{name}"), "bidecimal".to_owned()), outside);
         }
     }
+    for line in log.lines().filter(|s| s.starts_with("CORE ")) {
+        let mut parts = line.split_whitespace();
+        parts.next();
+        let name = parts
+            .next()
+            .ok_or("missing core path")?
+            .trim_end_matches(':');
+        let count: usize = parts
+            .next()
+            .and_then(|s| s.strip_prefix("generated="))
+            .ok_or("missing core count")?
+            .parse()?;
+        if count == 0
+            || functions
+                .insert((name.to_owned(), "core".to_owned()), count)
+                .is_some()
+        {
+            return Err("invalid core workload".into());
+        }
+    }
     if functions.is_empty() {
         return Err("no workload checks".into());
     }
     Ok(functions)
+}
+
+fn comparison_status<'a>(output: &'a str, path: &str) -> Result<&'a str> {
+    if !path.starts_with("float_") {
+        return Ok("exact");
+    }
+    let prefix = format!("ACCURACY {path}: rust_decimal_status=");
+    let mut records = output.lines().filter_map(|line| line.strip_prefix(&prefix));
+    let status = records.next().ok_or("missing conversion accuracy")?;
+    if records.next().is_some() || !matches!(status, "exact" | "inexact" | "unavailable") {
+        return Err("invalid conversion accuracy".into());
+    }
+    Ok(status)
+}
+
+fn comparison_policy(status: &str) -> &'static str {
+    if status == "exact" {
+        "same-result"
+    } else {
+        "**different-policy**"
+    }
+}
+
+fn result_row(
+    session: u32,
+    path: &str,
+    results: &BTreeMap<String, Stats>,
+    output: &str,
+) -> Result<String> {
+    if let Some(core) = results.get("core") {
+        return Ok(format!(
+            "| {session} | {path} (core parse of identical text) | — | {:.4}/{:.4}/{:.4} | — | — | — |\n",
+            core.median, core.min, core.p95
+        ));
+    }
+    let a = results.get("bidecimal").ok_or("missing bidecimal")?;
+    if path.starts_with("wide_") {
+        if results.len() != 1 {
+            return Err("unexpected standalone baseline".into());
+        }
+        let status = if path.starts_with("wide_float_") {
+            "unavailable"
+        } else {
+            "not-compared"
+        };
+        return Ok(format!(
+            "| {session} | {path} | {:.4}/{:.4}/{:.4} | — | — | {status} | — |\n",
+            a.median, a.min, a.p95
+        ));
+    }
+    let b = results.get("rust_decimal").ok_or("missing baseline")?;
+    let ratio = ratio(*a, *b)?;
+    let status = comparison_status(output, path)?;
+    let policy = comparison_policy(status);
+    Ok(format!(
+        "| {session} | {path} | {:.4}/{:.4}/{:.4} | {:.4}/{:.4}/{:.4} | {ratio:.6} | {status} | {policy} |\n",
+        a.median, a.min, a.p95, b.median, b.min, b.p95
+    ))
 }
 
 fn stats(
@@ -434,7 +521,9 @@ fn stats(
         .copied()
         != Some(count as usize)
         || count.fract() != 0.0
-        || (!paired && (!path.starts_with("wide_") || implementation != "bidecimal"))
+        || (!paired
+            && !((path.starts_with("wide_") && implementation == "bidecimal")
+                || (path.starts_with("float_core_parse_f64_") && implementation == "core")))
         || (paired
             && expected
                 .get(&(path.clone(), "rust_decimal".to_owned()))
@@ -618,7 +707,8 @@ const REJECTED_VARIABLES: [&str; 8] = [
     "RUSTDOCFLAGS",
     "RUSTFLAGS",
 ];
-const ALLOWED_CARGO_VARIABLES: [&str; 8] = [
+const ALLOWED_CARGO_VARIABLES: [&str; 9] = [
+    "CARGO_BUILD_JOBS",
     "CARGO_HOME",
     "CARGO_TARGET_DIR",
     "CARGO_BUILD_TARGET_DIR",
@@ -896,10 +986,10 @@ fn main() -> Result<()> {
     report.push_str("```\n");
     report.push_str("\n| Session | Date (UTC) | Load start | Load end | Wait seconds | Status | Unstable | Rerun cause |\n|---|---|---:|---:|---:|---|---|---|\n");
     let mut rows = String::from(
-        "\n| Session | Path | bidecimal median/min/p95 (ns/element) | rust_decimal median/min/p95 (ns/element) | Ratio |\n|---:|---|---:|---:|---:|\n",
+        "\n| Session | Path | bidecimal median/min/p95 (ns/element) | Baseline median/min/p95 (ns/element; rust_decimal unless labeled core) | Ratio | rust_decimal status | Comparison policy |\n|---:|---|---:|---:|---:|---|---|\n",
     );
     let mut diagnostic_rows = String::from(
-        "\n| Session | Path | Sample ratio median (diagnostic) | bidecimal <= baseline fraction (diagnostic) | Half median change bidecimal / baseline (diagnostic) | Slow fraction bidecimal / baseline (diagnostic) | Slow fraction difference (diagnostic) | Sample ratio half change (diagnostic) | Sample ratio IQR/median (diagnostic) | Unstable |\n|---:|---|---:|---:|---:|---:|---:|---:|---:|---|\n",
+        "\n| Session | Path | Sample ratio median (diagnostic) | bidecimal <= baseline fraction (diagnostic) | Half median change bidecimal / baseline (diagnostic) | Slow fraction bidecimal / baseline (diagnostic) | Slow fraction difference (diagnostic) | Sample ratio half change (diagnostic) | Sample ratio IQR/median (diagnostic) | Unstable | rust_decimal status | Comparison policy |\n|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|\n",
     );
     for session in 1..=3 {
         if source_id()? != source {
@@ -940,11 +1030,13 @@ fn main() -> Result<()> {
                 let (path, measurements, diagnostics) =
                     stats(&sample, &expected, &dir.join("raw"))?;
                 if let Some(d) = diagnostics {
+                    let status = comparison_status(&log, &path)?;
+                    let policy = comparison_policy(status);
                     if d.unstable {
                         unstable_paths.push(path.clone());
                     }
                     diagnostic_rows.push_str(&format!(
-                        "| {session} | {path} | {:.6} | {:.2} | {:+.6}/{:+.6} | {:.2}/{:.2} | {:.2} | {:+.6} | {:.6} | {} |\n",
+                        "| {session} | {path} | {:.6} | {:.2} | {:+.6}/{:+.6} | {:.2}/{:.2} | {:.2} | {:+.6} | {:.6} | {} | {status} | {policy} |\n",
                         d.ratio_median, d.win_fraction, d.half_changes[0], d.half_changes[1],
                         d.slow_fractions[0], d.slow_fractions[1], d.slow_difference,
                         d.ratio_half_change, d.ratio_iqr_over_median, d.unstable
@@ -1000,23 +1092,7 @@ fn main() -> Result<()> {
         fs::write(dir.join("metadata.md"), &line)?;
         report.push_str(&line);
         for (path, results) in grouped {
-            let a = results.get("bidecimal").ok_or("missing bidecimal")?;
-            let row = if path.starts_with("wide_") {
-                if results.len() != 1 {
-                    return Err("unexpected standalone baseline".into());
-                }
-                format!(
-                    "| {session} | {path} | {:.4}/{:.4}/{:.4} | — | — |\n",
-                    a.median, a.min, a.p95
-                )
-            } else {
-                let b = results.get("rust_decimal").ok_or("missing baseline")?;
-                let ratio = ratio(*a, *b)?;
-                format!(
-                    "| {session} | {path} | {:.4}/{:.4}/{:.4} | {:.4}/{:.4}/{:.4} | {ratio:.6} |\n",
-                    a.median, a.min, a.p95, b.median, b.min, b.p95
-                )
-            };
+            let row = result_row(session, &path, &results, &log)?;
             print!("{row}");
             rows.push_str(&row);
         }
@@ -1134,6 +1210,68 @@ mod tests {
     }
 
     #[test]
+    fn result_rows_include_accuracy_availability_and_policy() {
+        let summary = Stats {
+            median: 2.0,
+            min: 1.0,
+            p95: 3.0,
+        };
+        let paired = BTreeMap::from([
+            ("bidecimal".to_owned(), summary),
+            ("rust_decimal".to_owned(), summary),
+        ]);
+        let path = "float_from_f64_32_range_huge";
+        for status in ["exact", "inexact", "unavailable"] {
+            let log = format!("ACCURACY {path}: rust_decimal_status={status}");
+            let row = result_row(1, path, &paired, &log).unwrap();
+            let policy = if status == "exact" {
+                "same-result"
+            } else {
+                "**different-policy**"
+            };
+            assert_eq!(
+                row,
+                format!(
+                    "| 1 | {path} | 2.0000/1.0000/3.0000 | 2.0000/1.0000/3.0000 | 1.000000 | {status} | {policy} |\n"
+                )
+            );
+        }
+        assert!(result_row(1, path, &paired, "").is_err());
+        for status in ["yes", "no", "unknown"] {
+            assert!(
+                comparison_status(
+                    &format!("ACCURACY {path}: rust_decimal_status={status}"),
+                    path
+                )
+                .is_err()
+            );
+        }
+        let record = format!("ACCURACY {path}: rust_decimal_status=exact");
+        assert!(comparison_status(&format!("{record}\n{record}"), path).is_err());
+        assert!(
+            result_row(1, "parse64", &paired, "")
+                .unwrap()
+                .ends_with("| exact | same-result |\n")
+        );
+        let core = BTreeMap::from([("core".to_owned(), summary)]);
+        assert_eq!(
+            result_row(1, "float_core_parse_f64_64_short01", &core, "").unwrap(),
+            "| 1 | float_core_parse_f64_64_short01 (core parse of identical text) | — | 2.0000/1.0000/3.0000 | — | — | — |\n"
+        );
+        let wide = BTreeMap::from([("bidecimal".to_owned(), summary)]);
+        assert!(
+            result_row(1, "wide_float_to_f64_128_digits34", &wide, "")
+                .unwrap()
+                .ends_with("| unavailable | — |\n")
+        );
+        assert!(
+            result_row(1, "wide_parse128", &wide, "")
+                .unwrap()
+                .ends_with("| not-compared | — |\n")
+        );
+    }
+
+    #[test]
     fn raw_sample_scaling_and_manifest() {
         let iters = array(r#"{"iters":[1,2,4],"times":[20,80,240]}"#, "iters").unwrap();
         let times = array(r#"{"iters":[1,2,4],"times":[20,80,240]}"#, "times").unwrap();
@@ -1160,6 +1298,25 @@ mod tests {
             expected_functions("CHECK parse: generated=10 comparison=7 standalone=1 differing=1")
                 .is_err()
         );
+        let functions = expected_functions(
+            "CHECK float_to_f64_128_digits34: generated=256 inside=0 comparison=0 standalone=256 differing=0\nCORE float_core_parse_f64_128_digits34: generated=256 input=1.234",
+        ).unwrap();
+        assert_eq!(functions.len(), 2);
+        assert_eq!(
+            functions[&(
+                "wide_float_to_f64_128_digits34".to_owned(),
+                "bidecimal".to_owned()
+            )],
+            256
+        );
+        assert_eq!(
+            functions[&(
+                "float_core_parse_f64_128_digits34".to_owned(),
+                "core".to_owned()
+            )],
+            256
+        );
+        assert!(expected_functions("CORE float_core_parse_f64_32_short01: generated=0").is_err());
     }
 
     #[test]
@@ -1189,6 +1346,22 @@ mod tests {
         let expected = BTreeMap::from([(("wide_parse".to_owned(), "bidecimal".to_owned()), 10)]);
         let (_, results, diagnostic) = stats(&dir.join("sample.json"), &expected, &root).unwrap();
         assert!(diagnostic.is_none());
+        let core_dir = root.join("float_core_parse_f64_32_short01/core/new");
+        fs::create_dir_all(&core_dir).unwrap();
+        for name in ["sample.json", "benchmark.json", "estimates.json"] {
+            fs::copy(dir.join(name), core_dir.join(name)).unwrap();
+        }
+        let core_expected = BTreeMap::from([(
+            (
+                "float_core_parse_f64_32_short01".to_owned(),
+                "core".to_owned(),
+            ),
+            10,
+        )]);
+        let (_, core_results, diagnostic) =
+            stats(&core_dir.join("sample.json"), &core_expected, &root).unwrap();
+        assert!(diagnostic.is_none());
+        assert_eq!(core_results, vec![("core".to_owned(), results[0].1)]);
         let result = results[0].1;
         assert_eq!(
             result,
@@ -1487,7 +1660,6 @@ mod tests {
             "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
             "CARGO_BUILD_RUSTDOC",
             "CARGO_BUILD_INCREMENTAL",
-            "CARGO_BUILD_JOBS",
             "CARGO_INCREMENTAL",
             "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
             "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
