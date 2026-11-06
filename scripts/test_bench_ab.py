@@ -178,6 +178,42 @@ class BuildEnvironmentTests(unittest.TestCase):
                 BENCH.listed_titles("binary", self.work, filter="^missing$")
 
 
+class HarnessTreeTests(unittest.TestCase):
+    def test_workspace_members_are_extracted_with_the_harness(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name) / "repo"
+        files = {
+            "Cargo.toml": '[package]\nname = "x"\n\n[workspace]\nmembers = ["bench-instructions", "db-integration"]\n',
+            "Cargo.lock": "",
+            "rust-toolchain.toml": "",
+            "benches/ops.rs": "",
+            "bench-instructions/Cargo.toml": "",
+            "db-integration/Cargo.toml": "",
+            "src/lib.rs": "",
+            "docs/notes.md": "",
+        }
+        for name, text in files.items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(text)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", *files], check=True)
+        tree = subprocess.run(["git", "-C", str(repo), "write-tree"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+        cwd = os.getcwd()
+        os.chdir(repo)
+        self.addCleanup(os.chdir, cwd)
+        paths = BENCH.harness_paths(tree)
+        self.assertEqual(paths, ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "benches",
+                                 "bench-instructions", "db-integration"])
+        out = Path(tmp.name) / "tree"
+        out.mkdir()
+        BENCH.extract(tree, out, paths)
+        self.assertTrue((out / "db-integration" / "Cargo.toml").is_file())
+        self.assertFalse((out / "src").exists())
+        self.assertFalse((out / "docs").exists())
+
+
 class SerdeBenchmarkTests(unittest.TestCase):
     def test_stack_text_matches_the_serializer_limit(self):
         root = Path(__file__).resolve().parent.parent

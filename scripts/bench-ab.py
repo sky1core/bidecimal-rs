@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Compares the benchmark times or instruction counts of two commits on this machine.
 
-Both commits are built with the manifest, lock file, toolchain file, and
-benchmark code of one harness commit and the `src/` of the commit being
-measured; nothing else of either commit is copied, so the benchmark code,
-manifest, lock file, and toolchain are the same for both. Each Criterion
+Both commits are built with the manifest, lock file, toolchain file,
+benchmark code, and workspace members of one harness commit and the `src/` of
+the commit being measured; nothing else of either commit is copied, so the
+benchmark code, manifest, lock file, and toolchain are the same for both. Each Criterion
 target runs once per side and round, base first in even rounds and candidate
 first in odd rounds, and every run is saved as its own Criterion baseline. The
 report gives each benchmark's median time and range per side and the
@@ -157,6 +157,16 @@ def check_build_environment(working_directories):
 
 def commit(rev):
     return output(["git", "rev-parse", "--verify", f"{rev}^{{commit}}"])
+
+
+def harness_paths(harness):
+    """The harness files present in `harness`, plus the workspace members its
+    manifest lists, which Cargo needs to load the workspace."""
+    listed = output(["git", "ls-tree", "--name-only", harness]).splitlines()
+    paths = [path for path in HARNESS if path in listed]
+    manifest = tomllib.loads(output(["git", "show", f"{harness}:Cargo.toml"]))
+    members = manifest.get("workspace", {}).get("members", [])
+    return paths + [member for member in members if member not in paths]
 
 
 def extract(rev, tree, paths):
@@ -541,8 +551,7 @@ def main():
     revs = {"base": commit(args.base), "candidate": commit(args.candidate)}
     harness = commit(args.harness) if args.harness else revs["candidate"]
 
-    listed = output(["git", "ls-tree", "--name-only", harness]).splitlines()
-    harness_paths = [path for path in HARNESS if path in listed]
+    paths = harness_paths(harness)
 
     logs = args.out / "logs"
     logs.mkdir(parents=True)
@@ -550,7 +559,7 @@ def main():
     for side in SIDES:
         tree = (args.work / side).resolve()
         tree.mkdir(parents=True)
-        extract(harness, tree, harness_paths)
+        extract(harness, tree, paths)
         extract(revs[side], tree, ["src"])
         trees[side] = tree
     sysroot = Path(output([os.path.abspath(found), "--print", "sysroot"], cwd=trees["base"]))
