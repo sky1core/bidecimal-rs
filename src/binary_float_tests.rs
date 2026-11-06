@@ -1276,6 +1276,147 @@ fn binary_float_integer_argument_premises() {
 }
 
 #[test]
+fn binary_float_subnormal_integer_cache() {
+    for (index, (limbs, used)) in crate::tables::BINARY_SUBNORMAL_POW5.iter().enumerate() {
+        let actual = limbs[..*used]
+            .iter()
+            .rev()
+            .fold(BigUint::from(0_u8), |n, limb| n * 1_000_000_000_u32 + *limb);
+        assert_eq!(actual, BigUint::from(5_u8).pow(999 + 27 * index as u32));
+        assert_ne!(limbs[used - 1], 0);
+        assert!(limbs[*used..].iter().all(|&v| v == 0));
+    }
+    for trailing in 0..=52 {
+        for significand in [
+            1_u64 << trailing,
+            ((1_u64 << 53) - 1) >> trailing << trailing,
+        ] {
+            for raw_exp in [0_u64, 1, 2, 21, 22, 23, 48, 49, 50, 75, 76, 77] {
+                let magnitude = (raw_exp << 52) | (significand & ((1_u64 << 52) - 1));
+                for neg in [false, true] {
+                    for format in FORMATS {
+                        check_from(magnitude | if neg { F64.sign() } else { 0 }, F64, format);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn binary_float_extended_clinger_boundaries() {
+    for (limit, power, last) in [(1_u128 << 53, 22, 37), (1_u128 << 24, 10, 17)] {
+        for exp in power + 1..=last + 1 {
+            let factor = 10_u128.pow((exp - power) as u32);
+            let boundary = limit / factor;
+            for coeff in [
+                0,
+                1,
+                2,
+                3,
+                boundary.saturating_sub(1),
+                boundary,
+                boundary + 1,
+            ] {
+                for format in FORMATS {
+                    if coeff >= 10_u128.pow(bounds(format).0) {
+                        continue;
+                    }
+                    for neg in [false, true] {
+                        check_to(Finite { neg, coeff, exp }, format);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn binary_float_cached_powers_and_rounding_intervals() {
+    for k in 1..=38 {
+        for significand in [(1_u128 << 24) + 1, (1_u128 << 24) + 3] {
+            let midpoint = significand * 5_u128.pow(k);
+            for coeff in [midpoint - 1, midpoint, midpoint + 1] {
+                for format in FORMATS {
+                    if coeff >= 10_u128.pow(bounds(format).0) {
+                        continue;
+                    }
+                    for neg in [false, true] {
+                        check_to(
+                            Finite {
+                                neg,
+                                coeff,
+                                exp: -(k as i32),
+                            },
+                            format,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    for q in -342_i32..=308 {
+        let rational = Rational::decimal(1, q);
+        let scale = rational.binary_order() - 127;
+        let (n, d) = if scale >= 0 {
+            (rational.n, rational.d << scale as usize)
+        } else {
+            (rational.n << scale.unsigned_abs() as usize, rational.d)
+        };
+        let cache = BigUint::from(crate::tables::BINARY_POW5_CACHE[(q + 342) as usize]);
+        assert_eq!(cache, n / d, "cache q={q}");
+        assert_eq!((q * 217706) >> 16, scale + 127);
+        for coeff in [1, 9_999_999, 1_u128 << 53, u128::from(u64::MAX)] {
+            for format in FORMATS {
+                let (p, lo, hi) = bounds(format);
+                if coeff >= 10_u128.pow(p) || q < lo || q > hi {
+                    continue;
+                }
+                for neg in [false, true] {
+                    check_to(Finite { neg, coeff, exp: q }, format);
+                }
+            }
+        }
+    }
+    for coeff in [
+        9_007_199_254_740_993_u128,
+        9_007_199_254_740_995,
+        1_000_000_059_604_644_775_390_625,
+        1_000_000_059_604_644_775_390_625_000_000_000,
+        1_000_000_178_813_934_326_171_875_000_000_000,
+        9_999_999_999_999_999_999_999_999_999_999_999,
+    ] {
+        for delta in [-1_i128, 0, 1] {
+            let coeff = (coeff as i128 + delta) as u128;
+            if coeff >= 10_u128.pow(34) {
+                continue;
+            }
+            for exp in [
+                -361, -342, -324, -308, -64, -46, -33, -24, -1, 0, 19, 38, 290, 308,
+            ] {
+                for neg in [false, true] {
+                    check_to(Finite { neg, coeff, exp }, Format::D128);
+                }
+            }
+        }
+    }
+    let mut rng = Rng(0x6a09_e667_f3bc_c909);
+    for _ in 0..RANDOM_CASES {
+        let digits = 17 + rng.next() as u32 % 18;
+        let coeff = 10_u128.pow(digits - 1) + rng.wide() % (9 * 10_u128.pow(digits - 1));
+        let exp = -361 + (rng.next() % 670) as i32;
+        check_to(
+            Finite {
+                neg: rng.next() & 1 != 0,
+                coeff,
+                exp,
+            },
+            Format::D128,
+        );
+    }
+}
+
+#[test]
 fn binary_float_clinger_boundaries_and_generated_tables() {
     for (limit, max_power) in [(1_u128 << 53, 22_i32), (1_u128 << 24, 10)] {
         for coeff in [limit - 1, limit, limit + 1] {

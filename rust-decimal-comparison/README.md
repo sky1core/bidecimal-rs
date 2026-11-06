@@ -93,12 +93,33 @@ parser baseline. The normal runner also includes them and preserves their
 
 | Fixtures | Exact decimal text |
 |---|---|
-| All widths | short01 = 0.1, short15 = 1.5, short12345 = 123.45, integer = 42, tiny = 1e-28, huge = 1e28 |
-| Decimal64 and Decimal128 | digits15 = 1.23456789012345, digits16 = 1.234567890123456 |
-| Decimal128 only | digits34 = 1.234567890123456789012345678901234; f32_double_round = 1.000000059604644775390625001; f32_midpoint = 1.000000059604644775390625000000001 |
+| All widths | short01 = 0.1, short15 = 1.5, short12345 = 123.45, integer = 42, tiny = 1e-28, huge = 1e28, extended32 = 1e11, large_exp = 1e80, subnormal32 = 1e-45 |
+| Decimal64 and Decimal128 | digits15 = 1.23456789012345, digits16 = 1.234567890123456, subnormal64 = 5e-324, subnormal64_max = 2.225073858507201e-308 |
+| Decimal128 only | digits17 = 1.2345678901234567, digits18 = 1.23456789012345678, digits19 = 1.234567890123456789, digits34 = 1.234567890123456789012345678901234; f32_double_round = 1.000000059604644775390625001; f32_midpoint = 1.000000059604644775390625000000001 |
 | range_tiny, by width | 1e-101, 1e-398, 1e-6176 |
 | range_huge, by width | 9.999999e96, 9.999999999999999e384, 9.999999999999999999999999999999999e6144 |
 | Additional binary inputs | subnormal = from_bits(1), power2 = 2^80, separately for f64 and f32 |
+
+A single repeated input lets the branch predictor learn its path. The mixed
+paths instead measure 256 inputs drawn independently with a fixed SplitMix64
+seed, each with a random sign; draws can repeat:
+
+| Path (W = 32, 64, 128) | Inputs | Baseline |
+|---|---|---|
+| float_mixed_to_f64_W_short / float_mixed_to_f32_W_short | 1–7 random significant digits, adjusted exponent −8..2 | rust_decimal, built exactly from coefficient and scale |
+| wide_float_mixed_to_f64_W_full / wide_float_mixed_to_f32_W_full | all P digits, adjusted exponent −37..38 | — |
+| wide_float_mixed_to_f64_W_wide | all P digits, adjusted exponent −307..308, clipped to −95..96 for Decimal32 | — |
+| float_mixed_from_f64_W_unit | random f64 bits with biased exponent 1013..1032 | rust_decimal FromPrimitive::from_f64 |
+| wide_float_mixed_from_f64_W_normal / wide_float_mixed_from_f32_W_normal | random normal f64 or f32 bits over every biased exponent | — |
+
+Each mixed path's `FLOAT_INPUT ... mixed` record gives its number of distinct
+inputs and, for paired paths, how many of the 256 rust_decimal results equal
+the exact result. Only paired mixed paths print `ACCURACY`, and it gives only
+the resulting exact or inexact status. Records of standalone paths use the
+path name without the `wide_` prefix. If rust_decimal's `from_f64` returned
+`None` for any unit input, that path would instead be measured standalone as
+`wide_float_mixed_from_f64_W_unit` without `ACCURACY`; with the fixed seed all
+three unit paths are paired.
 
 All decimal fixtures parse exactly in the designated width. Binary inputs are
 parsed directly as f64/f32 from those same decimal strings, plus the two binary

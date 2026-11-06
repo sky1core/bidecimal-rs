@@ -67,9 +67,9 @@ and encoding, and overflow mapping remain outside this Verus proof.
 
 The four inherent methods on each width are manually written conversions,
 with the contract in [SPEC.md](SPEC.md#binary-floating-point-conversion).
-`to_f64` and `to_f32` select exact integer or Clinger paths under the
-bounds below; other values use exact decimal text and the destination's
-core floating-point parser.
+`to_f64` and `to_f32` select Clinger, cached-power interval, or exact integer
+paths under the bounds below; unresolved intervals use exact decimal text
+and the destination's core floating-point parser.
 `from_f64` rounds the exact binary rational once to `min(P,15)` significant
 decimal digits; `from_f32` uses `min(P,6)`. The destination's minimum exponent
 is included in the same rounding. Both then use the existing fractional-zero
@@ -79,29 +79,30 @@ binary format. These are value-returning methods, not additional modes of
 the arithmetic, parsing, quantize, width-conversion or serde APIs.
 
 **Verification status.** The current implementation has manual
-whole-domain arguments and independent exact-rational tests, including the
-new path boundaries. On 2026-11-06 it passed the gates and all four
-exhaustive conversion tests listed in the next table, each exhaustive sign
-lane as one complete run. The 2026-11-04 gates and the 2026-11-05 full
-Decimal32/binary32 checks recorded further below apply to the preceding
-text-based implementation and remain historical evidence. No direct Verus or
-Kani proof of these methods is claimed. Existing helper proofs do not extend
-to these callers.
+whole-domain arguments and independent exact-rational tests, including every
+new path boundary and every cache entry. On 2026-11-06 it passed the gates and
+all four exhaustive conversion tests listed in the next table, each exhaustive
+sign lane as one complete run. The four exhaustive checksums equal those
+recorded for the preceding implementation. The 2026-11-04 gates and the
+2026-11-05 full Decimal32/binary32 checks recorded further below apply to the
+earlier text-based implementation and remain historical evidence. No direct
+Verus or Kani proof of these methods is claimed. Existing helper proofs do not
+extend to these callers.
 
 | Check on the current implementation | Result |
 |---|---|
-| `cargo fmt --check`; clippy `--all-targets -D warnings`, default and `serde` | Passed |
-| `cargo test --offline --locked`, default / `serde` | 129 pass, 23 ignored / 147 pass, 24 ignored; each doctest suite 7 pass |
-| MSRV Rust 1.98.0 `cargo test --offline --locked binary_float` | 15 pass, 4 ignored |
-| `cargo build --lib --target x86_64-unknown-none`, default and `serde` | Passed |
-| `cargo bench --offline --locked -- --test` | Passed; no timing result |
+| `cargo fmt --check`; clippy `--all-targets -D warnings`, default, `serde` and all features | Passed |
+| `cargo test --locked`, default / `serde` library | 132 pass, 23 ignored / 150 pass, 24 ignored; each doctest suite 7 pass |
+| MSRV Rust 1.98.0 `cargo test --locked`, default / `serde` library | 132 pass, 23 ignored / 150 pass, 24 ignored; each doctest suite 7 pass |
+| `cargo build --release --lib --target x86_64-unknown-none`, default and `serde` | Passed |
+| `cargo bench --locked -- --test` | Passed; no timing result |
 | `binary_float_exhaustive_decimal32_positive` / `_negative` | Each `2^31` raw patterns: 1,922,000,001 accepted and 225,483,647 rejected, both `to_f32` and `to_f64` compared; checksums `6cd87e0075a73583` / `60d04e0075a73583` |
 | `binary_float_exhaustive_f32_positive` / `_negative` | Each `2^31` raw f32 patterns into all three decimal widths, 6,442,450,944 output comparisons; checksums `000018b120733f8c821723cfed600100` / `000058b120733f8c829893dfed600100` |
 
 These ran with Rust 1.99.1 on aarch64 macOS, using the repository commands
 shown in the binary32 coverage section below, two sign lanes at a time. They
-are not an x86_64 runtime result for the current implementation, and no
-`thumbv7em-none-eabihf` build was rerun for it.
+are not an x86_64 runtime result, and no `thumbv7em-none-eabihf` build was
+rerun for it.
 
 ### Bounded implementation obligations
 
@@ -127,6 +128,11 @@ The manual obligations for the exact algorithm selection are:
    core's short path, x86 without SSE2 excludes this algorithm to avoid x87
    extended intermediate precision; exact integer/text paths remain available
    without an additional caller requirement.
+   For q>22 (binary64) or q>10 (binary32), form the exact integer
+   `I=C*10^(q-22)` or `I=C*10^(q-10)`. If I is at most `2^53` or `2^24`,
+   respectively, I and the remaining power are exact destination operands,
+   so one multiply still performs the sole rounding. Nonzero admission
+   ends at q=37 or q=17. The same x86/SSE2 guard applies.
 2. **Integer-rational to binary32.** Outside Clinger, `0 < C <= u64::MAX`
    and `-17 <= q < 0` permit `C / 5^k * 2^-k`, k=-q. D=`5^k < 2^40`.
    Let b be the bit-width difference of C and D, reduced by one when the
@@ -142,6 +148,13 @@ The manual obligations for the exact algorithm selection are:
    including a possible carry to the next exponent. Assembling the bits
    performs no further rounding. The k<=17 limit follows from the 64-bit
    numerator bound, not from particular fixture values.
+   Ambiguous cached binary32 conversions with `-37<=q<0` instead use
+   u128 quotient/remainder arithmetic on the complete coefficient.
+   Alignment fits u128 because C has at most 113 bits and `5^37` has 86
+   bits; scaling to 24 bits needs fewer than 128 bits. The result remains
+   normal: even `1e-37` exceeds the minimum normal f32, and C<10^34
+   with negative q cannot overflow. The same exact remainder/parity test
+   rounds directly to f32, including exact midpoint cases.
 3. **Fixed-width exact expansion.** If e>=0 and `bit_width(m)+e <= 128`,
    `m << e` fits u128. If e<0, k=-e<=55 and
    `bit_width(m)+bit_width(5^k) <= 128` imply `m*5^k < 2^128`.
@@ -161,6 +174,11 @@ The manual obligations for the exact algorithm selection are:
    span several limbs and is appended by repeated division by B. Every
    intermediate integer is bounded by the full expansion; thus every
    append fits the array. Each chunk decreases the remaining power.
+   For k=-e>=999, three exact cached integers `5^999`, `5^1026` and
+   `5^1053` replace the initial chunks. Since k<=1074, `floor(k/27)` is
+   37..39; multiplying that cache by m and `5^(k mod 27)` reconstructs
+   exactly the same integer. Both factors are at most `2^63`, every
+   intermediate remains below the full expansion, and rounding is unchanged.
 5. **One decimal rounding decision.** Let L be the exact digit count,
    q the terminating quantum, and K the selected 7, 15 or 6 digits. Choose
    `drop = max(L-K, qmin-q, 0)` once. For limbs, L is nine times the count
@@ -191,15 +209,42 @@ The manual obligations for the exact algorithm selection are:
    Bounds and grammar guarantee valid UTF-8 and valid parser input. The
    f32 path invokes the f32 parser directly. These exact algorithm choices
    do not return approximations or recover from conversion errors.
-8. **Tables and specials.** New tables are built in const functions from
+8. **Tables and specials.** Small tables are built in const functions from
    integer arithmetic: 56 u128 powers `5^0..5^55` (896 bytes), 23 exact f64
    powers `10^0..10^22` (184 bytes), and 11 exact f32 powers `10^0..10^10`
    (44 bytes), totaling 1,124 bytes before compiler elimination. Floating
-   entries cast the existing exact integer power tables; no runtime integer
-   exponentiation or literal table data is used. Classification precedes
+   entries cast the existing exact integer power tables. An additional
+   651-entry u128 cache occupies 10,416 bytes and stores the normalized
+   floor of each `5^q`, q=-342..308. Its literal entries are independently
+   checked against BigUint division. Three const-built 86-limb integer
+   caches with lengths occupy 1,056 bytes on 64-bit targets (1,044 on 32-bit).
+   No runtime integer exponentiation is used. Classification precedes
    finite arithmetic. Signed zero/infinity and quiet NaN sign/payload
    transport retain their existing masks and destination-fit rules; NaN
    fields never go through floating arithmetic.
+9. **Cached-power intervals to binary.** For nonzero C exceeding u64,
+   let d=digits(C)-19 and write `C/10^d=w+theta`, `0<=theta<1`;
+   otherwise w=C and theta=0. Use Q=q+d. With w<=u64::MAX,
+   Q>308 implies binary64 overflow, and Q<-342 is below half its minimum
+   subnormal; binary32 uses the safe bounds Q>38 and Q<-64. These
+   conclusions also hold when theta is nonzero.
+   For the remaining range set `L=floor(log2(10^Q))` and
+   `A=floor(10^Q*2^(127-L))`. The integer formula
+   `(Q*217706)>>16` equals L throughout the finite cached range, checked
+   independently at every exponent. If z=leading_zeros(w), the exact
+   64-by-128-bit product of `w<<z` and A has upper 128 bits T. After
+   scaling by `2^(L-63-z)`, the source lies within `[T,T+2]` when theta=0.
+   Cache truncation contributes less than one unit, and dropping the low
+   product limb contributes less than one. For theta>0, use
+   `[T,T+(A>>(64-z))+3]`: the discarded decimal tail contributes less
+   than `A/2^(64-z)`, and `(w+theta)*2^z<2^64` keeps the cache-error
+   contribution below one. Checked addition rejects an overflowing bound.
+   Round both endpoints once to p=53 or p=24, shifting directly to the
+   subnormal unit when needed, with exact guard/remainder/parity arithmetic.
+   Equal endpoint significands certify the result by monotonicity; an
+   ambiguous interval selects the complete-coefficient integer or text path.
+   Exponent carry and saturation are applied to the rounded significand.
+   This integer-only path also works on x86 without SSE2.
 
 These are manual whole-domain arguments, not direct machine proofs of the
 Rust dispatch, arithmetic, indexing, parser, or composition.
@@ -229,6 +274,16 @@ continue to cover ties, carry, direct f32 rounding, decimal underflow and
 binary subnormal/overflow boundaries. The ordinary independent references
 do not use these production tables, helpers or the core parser as expected
 values.
+
+`binary_float_extended_clinger_boundaries` checks the largest admitted
+coefficient and its neighbors at every extended exponent, both signs and
+all fitting widths. `binary_float_cached_powers_and_rounding_intervals`
+checks every cache entry, the binary exponent formula, all cache exponents,
+17..34-digit random coefficients, truncated-tail neighbors, and even/odd
+binary32 midpoints through the u128/text boundary. Expectations use the
+independent BigUint rational oracle. `binary_float_subnormal_integer_cache`
+checks the three complete cached integers, limb lengths, all cancellation
+counts and cache-transition neighbors against the independent from oracle.
 
 ### Fixed-version core parser contract
 

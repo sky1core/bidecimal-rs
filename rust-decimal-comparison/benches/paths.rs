@@ -536,15 +536,23 @@ pub fn float_inputs(width: u32) -> Vec<(&'static str, &'static str)> {
         ("integer", "42"),
         ("tiny", "1e-28"),
         ("huge", "1e28"),
+        ("extended32", "1e11"),
+        ("large_exp", "1e80"),
+        ("subnormal32", "1e-45"),
     ];
     if width >= 64 {
         inputs.extend([
             ("digits15", "1.23456789012345"),
             ("digits16", "1.234567890123456"),
+            ("subnormal64", "5e-324"),
+            ("subnormal64_max", "2.225073858507201e-308"),
         ]);
     }
     if width == 128 {
         inputs.extend([
+            ("digits17", "1.2345678901234567"),
+            ("digits18", "1.23456789012345678"),
+            ("digits19", "1.234567890123456789"),
             ("digits34", "1.234567890123456789012345678901234"),
             ("f32_double_round", "1.000000059604644775390625001"),
             ("f32_midpoint", "1.000000059604644775390625000000001"),
@@ -677,9 +685,240 @@ fn float_paths(c: &mut Criterion) {
     width!(Decimal128, 128);
 }
 
+fn measure_ours<A, O>(c: &mut Criterion, name: &str, inputs: &[A], ours: impl Fn(&A) -> O) {
+    let mut group = c.benchmark_group(name);
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(inputs.len() as u64));
+    group.bench_function("bidecimal", |bencher| {
+        bencher.iter(|| {
+            for input in inputs {
+                black_box(ours(black_box(input)));
+            }
+        });
+    });
+    group.finish();
+}
+
+const MIXED_SEED: u64 = 0x1319_8a2e_0370_7344;
+
+// FLOAT_COUNT independently drawn signed decimals, possibly repeated: `digits`
+// random significant digits and an adjusted exponent drawn from `adjusted`.
+fn mixed_decimals(
+    rng: &mut SplitMix64,
+    digits: std::ops::RangeInclusive<u32>,
+    adjusted: std::ops::RangeInclusive<i32>,
+) -> Vec<(i128, i32, String)> {
+    (0..FLOAT_COUNT)
+        .map(|_| {
+            let span = digits.end() - digits.start() + 1;
+            let n = digits.start() + (rng.next() % u64::from(span)) as u32;
+            let low = 10_u128.pow(n - 1);
+            let bits = (u128::from(rng.next()) << 64) | u128::from(rng.next());
+            let coeff = (low + bits % (9 * low)) as i128;
+            let width = (adjusted.end() - adjusted.start() + 1) as u64;
+            let exp = adjusted.start() + (rng.next() % width) as i32 - (n as i32 - 1);
+            let coeff = if rng.next() & 1 == 0 { coeff } else { -coeff };
+            (coeff, exp, format!("{coeff}e{exp}"))
+        })
+        .collect()
+}
+
+fn mixed_binary(
+    rng: &mut SplitMix64,
+    binary_width: u32,
+    fields: std::ops::RangeInclusive<u64>,
+) -> Vec<u64> {
+    let fraction = if binary_width == 32 { 23 } else { 52 };
+    (0..FLOAT_COUNT)
+        .map(|_| {
+            let span = fields.end() - fields.start() + 1;
+            let field = fields.start() + rng.next() % span;
+            let sign = (rng.next() & 1) << (binary_width - 1);
+            sign | field << fraction | rng.next() & ((1 << fraction) - 1)
+        })
+        .collect()
+}
+
+// The CHECK and ACCURACY records follow `conversion`; FLOAT_INPUT keeps the
+// distinct-input count and the number of exact rust_decimal results.
+fn mixed_records(name: &str, distinct: usize, rust_decimal_exact: Option<usize>) {
+    let compared = if rust_decimal_exact.is_some() {
+        FLOAT_COUNT
+    } else {
+        0
+    };
+    println!(
+        "CHECK {name}: generated={FLOAT_COUNT} inside={compared} comparison={compared} standalone={} differing=0",
+        FLOAT_COUNT - compared
+    );
+    match rust_decimal_exact {
+        Some(exact) => {
+            println!(
+                "FLOAT_INPUT path={name} mixed distinct={distinct} rust_decimal_exact={exact}/{FLOAT_COUNT}"
+            );
+            let status = if exact == FLOAT_COUNT {
+                "exact"
+            } else {
+                "inexact"
+            };
+            println!("ACCURACY {name}: rust_decimal_status={status}");
+        }
+        None => println!("FLOAT_INPUT path={name} mixed distinct={distinct}"),
+    }
+}
+
+fn mixed_float_paths(c: &mut Criterion) {
+    let mut rng = SplitMix64(MIXED_SEED);
+    macro_rules! width {
+        ($ty:ty, $width:literal, $precision:literal, $adjusted:expr) => {{
+            let classes = [
+                ("short", 1..=7, -8..=2),
+                ("full", $precision..=$precision, -37..=38),
+                ("wide", $precision..=$precision, $adjusted),
+            ];
+            for (class, digits, adjusted) in classes {
+                let inputs = mixed_decimals(&mut rng, digits, adjusted);
+                let values: Vec<$ty> = inputs
+                    .iter()
+                    .map(|(_, _, text)| <$ty>::parse(text).unwrap())
+                    .collect();
+                macro_rules! to_binary {
+                    ($binary_width:literal, $method:ident) => {{
+                        if $binary_width == 32 && class == "wide" {
+                            continue;
+                        }
+                        for ((_, _, text), value) in inputs.iter().zip(&values) {
+                            assert_eq!(
+                                value.$method().to_bits() as u64,
+                                support::decimal_binary(text, $binary_width)
+                            );
+                        }
+                        let name =
+                            format!("float_mixed_{}_{}_{class}", stringify!($method), $width);
+                        let distinct = values
+                            .iter()
+                            .map(|v| v.to_bits())
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .len();
+                        if class == "short" {
+                            let base: Vec<Decimal> = inputs
+                                .iter()
+                                .map(|&(coeff, exp, _)| {
+                                    if exp <= 0 {
+                                        Decimal::from_i128_with_scale(coeff, exp.unsigned_abs())
+                                    } else {
+                                        Decimal::from_i128(coeff * 10_i128.pow(exp as u32)).unwrap()
+                                    }
+                                })
+                                .collect();
+                            let exact = inputs
+                                .iter()
+                                .zip(&base)
+                                .filter(|((_, _, text), v)| {
+                                    v.$method().map(|b| b.to_bits() as u64)
+                                        == Some(support::decimal_binary(text, $binary_width))
+                                })
+                                .count();
+                            mixed_records(&name, distinct, Some(exact));
+                            measure_pair(
+                                c,
+                                &name,
+                                &values,
+                                &base,
+                                |v| v.$method(),
+                                |v| v.$method(),
+                            );
+                        } else {
+                            mixed_records(&name, distinct, None);
+                            measure_ours(c, &format!("wide_{name}"), &values, |v| v.$method());
+                        }
+                    }};
+                }
+                to_binary!(64, to_f64);
+                to_binary!(32, to_f32);
+            }
+            macro_rules! from_binary {
+                ($binary:ty, $binary_width:literal, $class:literal, $fields:expr) => {{
+                    let inputs: Vec<$binary> = mixed_binary(&mut rng, $binary_width, $fields)
+                        .into_iter()
+                        .map(|bits| <$binary>::from_bits(bits as _))
+                        .collect();
+                    let from = if $binary_width == 64 {
+                        "from_f64"
+                    } else {
+                        "from_f32"
+                    };
+                    for &input in &inputs {
+                        let expected =
+                            support::binary_decimal(input.to_bits() as u64, $binary_width, $width);
+                        let ours = if $binary_width == 64 {
+                            <$ty>::from_f64(input as f64)
+                        } else {
+                            <$ty>::from_f32(input as f32)
+                        };
+                        support::verify_binary_decimal(ours.to_bits() as u128, $width, &expected);
+                    }
+                    let name = format!("float_mixed_{from}_{}_{}", $width, $class);
+                    let distinct = inputs
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len();
+                    let base: Option<Vec<Decimal>> = inputs
+                        .iter()
+                        .map(|&v| Decimal::from_f64(v as f64))
+                        .collect();
+                    match base {
+                        Some(base) if $binary_width == 64 => {
+                            let exact = inputs
+                                .iter()
+                                .zip(&base)
+                                .filter(|&(&v, &b)| {
+                                    support::rust_decimal_exact(
+                                        Some(b),
+                                        &support::binary_decimal(v.to_bits() as u64, 64, $width),
+                                    )
+                                })
+                                .count();
+                            mixed_records(&name, distinct, Some(exact));
+                            measure_pair(
+                                c,
+                                &name,
+                                &inputs,
+                                &inputs,
+                                |&v| <$ty>::from_f64(v as f64),
+                                |&v| Decimal::from_f64(v as f64),
+                            );
+                        }
+                        _ if $binary_width == 64 => {
+                            mixed_records(&name, distinct, None);
+                            measure_ours(c, &format!("wide_{name}"), &inputs, |&v| {
+                                <$ty>::from_f64(v as f64)
+                            })
+                        }
+                        _ => {
+                            mixed_records(&name, distinct, None);
+                            measure_ours(c, &format!("wide_{name}"), &inputs, |&v| {
+                                <$ty>::from_f32(v as f32)
+                            })
+                        }
+                    }
+                }};
+            }
+            from_binary!(f64, 64, "unit", 1013..=1032);
+            from_binary!(f64, 64, "normal", 1..=2046);
+            from_binary!(f32, 32, "normal", 1..=254);
+        }};
+    }
+    // "wide" spans the binary64 range, clipped to the adjusted exponents of each width.
+    width!(Decimal32, 32, 7, -95..=96);
+    width!(Decimal64, 64, 16, -307..=308);
+    width!(Decimal128, 128, 34, -307..=308);
+}
+
 criterion_group! { name = benches; config = Criterion::default()
 .warm_up_time(Duration::from_secs(2)).measurement_time(Duration::from_secs(5)).sample_size(100);
-targets = paths, float_paths }
+targets = paths, float_paths, mixed_float_paths }
 criterion_main!(benches);
 
 #[cfg(test)]

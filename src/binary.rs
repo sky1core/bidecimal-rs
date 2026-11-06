@@ -11,7 +11,9 @@
 
 use crate::layout::{InRange, Unpacked, Width};
 use crate::operand::sealed::Class;
-use crate::tables::{BINARY_POW5, F32_POW10, F64_POW10, pow10, pow10_64};
+use crate::tables::{
+    BINARY_POW5, BINARY_POW5_CACHE, BINARY_SUBNORMAL_POW5, F32_POW10, F64_POW10, pow10, pow10_64,
+};
 
 pub(crate) enum Converted<W: Width> {
     Finite(InRange<W>),
@@ -89,7 +91,7 @@ fn scientific(value: Unpacked) -> Text {
 
 #[expect(
     clippy::expect_used,
-    reason = "scientific writes a nonempty valid finite decimal literal; core parsing returns a rounded value, including infinity or zero on range overflow or underflow"
+    reason = "the Clinger exponent |q|<=22 indexes the 23 exact powers"
 )]
 pub(crate) fn to_f64(value: Class) -> f64 {
     match value {
@@ -109,10 +111,7 @@ pub(crate) fn to_f64(value: Class) -> f64 {
                 };
                 if value.neg { -magnitude } else { magnitude }
             } else {
-                scientific(value)
-                    .as_str()
-                    .parse()
-                    .expect("valid exact decimal")
+                to_f64_general(value)
             }
         }
         Class::Infinite(neg) => f64::from_bits((u64::from(neg) << 63) | 0x7ff0_0000_0000_0000),
@@ -127,9 +126,38 @@ pub(crate) fn to_f64(value: Class) -> f64 {
     }
 }
 
+#[inline(never)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::expect_used,
+    reason = "extended Clinger multiplies C<=2^53 by 10^k<=10^15 in u128; scientific writes a nonempty valid finite decimal literal; core parsing returns a rounded value, including infinity or zero on range overflow or underflow"
+)]
+fn to_f64_general(value: Unpacked) -> f64 {
+    if cfg!(not(all(target_arch = "x86", not(target_feature = "sse2"))))
+        && value.exp > 22
+        && value.exp <= 37
+        && value.coeff <= 1_u128 << 53
+    {
+        let integer = value.coeff * u128::from(pow10_64((value.exp - 22) as u32));
+        // Both operands are exact: integer <= 2^53 and 10^22 = 5^22 * 2^22.
+        // The final multiply is the only rounding of C * 10^q.
+        if integer <= 1_u128 << 53 {
+            let magnitude = integer as u64 as f64 * F64_POW10[22];
+            return if value.neg { -magnitude } else { magnitude };
+        }
+    }
+    if let Some(bits) = cached_binary::<false>(value) {
+        return f64::from_bits(bits);
+    }
+    scientific(value)
+        .as_str()
+        .parse()
+        .expect("valid exact decimal")
+}
+
 #[expect(
     clippy::expect_used,
-    reason = "scientific writes valid exact decimal syntax and parse is instantiated directly for f32; range endpoints return rounded infinity or signed zero, not a syntax error"
+    reason = "the Clinger exponent |q|<=10 indexes the 11 exact powers"
 )]
 pub(crate) fn to_f32(value: Class) -> f32 {
     match value {
@@ -153,12 +181,9 @@ pub(crate) fn to_f32(value: Class) -> f32 {
                 && value.exp < 0
                 && value.exp >= -17
             {
-                rational_f32(value)
+                rational_f32::<false>(value)
             } else {
-                scientific(value)
-                    .as_str()
-                    .parse()
-                    .expect("valid exact decimal")
+                to_f32_general(value)
             }
         }
         Class::Infinite(neg) => f32::from_bits((u32::from(neg) << 31) | 0x7f80_0000),
@@ -173,12 +198,124 @@ pub(crate) fn to_f32(value: Class) -> f32 {
     }
 }
 
+#[inline(never)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::expect_used,
+    reason = "extended Clinger multiplies C<=2^24 by 10^k<=10^7 in u128 and uses table index 10; scientific writes valid exact decimal syntax and parse is instantiated directly for f32; range endpoints return rounded infinity or signed zero, not a syntax error"
+)]
+fn to_f32_general(value: Unpacked) -> f32 {
+    if cfg!(not(all(target_arch = "x86", not(target_feature = "sse2"))))
+        && value.exp > 10
+        && value.exp <= 17
+        && value.coeff <= 1_u128 << 24
+    {
+        let integer = value.coeff * u128::from(pow10_64((value.exp - 10) as u32));
+        // integer <= 2^24 and 10^10 are exact f32 operands, so only the product rounds.
+        if integer <= 1_u128 << 24 {
+            let magnitude = integer as u32 as f32 * F32_POW10[10];
+            return if value.neg { -magnitude } else { magnitude };
+        }
+    }
+    if let Some(bits) = cached_binary::<true>(value) {
+        return f32::from_bits(bits as u32);
+    }
+    if value.exp < 0 && value.exp >= -37 {
+        return rational_f32::<true>(value);
+    }
+    scientific(value)
+        .as_str()
+        .parse()
+        .expect("valid exact decimal")
+}
+
 #[expect(
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
-    reason = "0<C<2^64 and 1<=k<=17; D=5^k<2^40. Normalization compares <=64-bit integers in u128; scaling to 24 bits gives N<2^64 and D<2^41. Quotient is 24 bits, carry 25 bits, and -57<=b-k<=63 is normal f32"
+    reason = "C<10^34; truncation drops 1..15 digits to w<10^19; q in -342..308 indexes 651 entries; normalized w is 64 bits, exact carrying multiplies form 192 bits, shifts are bounded by leading_zeros<64"
 )]
-fn rational_f32(value: Unpacked) -> f32 {
+fn cached_binary<const SINGLE: bool>(value: Unpacked) -> Option<u64> {
+    let (fraction, bias, max_exp, sign) = if SINGLE {
+        (23, 127, 127, u64::from(value.neg) << 31)
+    } else {
+        (52, 1023, 1023, u64::from(value.neg) << 63)
+    };
+    if value.coeff == 0 {
+        return Some(sign);
+    }
+    let mut q = value.exp;
+    let (w, truncated) = if value.coeff > u128::from(u64::MAX) {
+        let drop = crate::kernel::digits(value.coeff) - 19;
+        let (w, remainder) = crate::kernel::div_rem_pow10(value.coeff, drop);
+        q += drop as i32;
+        (w as u64, remainder != 0)
+    } else {
+        (value.coeff as u64, false)
+    };
+    let infinity = ((2 * bias + 1) as u64) << fraction;
+    if q > if SINGLE { 38 } else { 308 } {
+        return Some(sign | infinity);
+    }
+    if q < if SINGLE { -64 } else { -342 } {
+        return Some(sign);
+    }
+    let cache = BINARY_POW5_CACHE[(q + 342) as usize];
+    let zeros = w.leading_zeros();
+    let normalized = w << zeros;
+    let (_, carry) = normalized.carrying_mul(cache as u64, 0);
+    let (middle, high) = normalized.carrying_mul((cache >> 64) as u64, carry);
+    let lower = (u128::from(high) << 64) | u128::from(middle);
+    // The floored 128-bit cache loses <1 unit; dropping the product's low
+    // limb adds <1. A discarded decimal tail adds <cache / 2^(64-zeros).
+    let error = if truncated {
+        (cache >> (64 - zeros)) + 3
+    } else {
+        2
+    };
+    let upper = lower.checked_add(error)?;
+    let scale = ((q * 217706) >> 16) - 63 - zeros as i32;
+    let exponent = lower.bit_width() as i32 - 1 + scale;
+    if exponent > max_exp {
+        return Some(sign | infinity);
+    }
+    let shift =
+        (lower.bit_width() - fraction - 1).max((1 - bias - fraction as i32 - scale).max(0) as u32);
+    if shift > 128 {
+        return Some(sign);
+    }
+    let lo = rounded_binary_significand(lower, shift);
+    let hi = rounded_binary_significand(upper, shift);
+    if lo != hi {
+        return None;
+    }
+    let bits = if exponent < 1 - bias {
+        lo
+    } else {
+        (((exponent + bias - 1) as u64) << fraction) + lo
+    };
+    Some(sign | bits.min(infinity))
+}
+
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "shift is 74..128 (f64) or 103..128 (f32); the quotient has at most 53 bits before its rounding increment, the remainder mask and halfway shifts are below 128"
+)]
+fn rounded_binary_significand(value: u128, shift: u32) -> u64 {
+    if shift == 128 {
+        return u64::from(value > 1_u128 << 127);
+    }
+    let quotient = (value >> shift) as u64;
+    let remainder = value & ((1_u128 << shift) - 1);
+    let halfway = 1_u128 << (shift - 1);
+    quotient + u64::from(remainder > halfway || (remainder == halfway && quotient & 1 != 0))
+}
+
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "narrow: 0<C<2^64, k<=17, scaled N<2^64 and D<2^41; wide: C<10^34, k<=37, normalization and 24-bit scaling fit u128 since bit_width(5^37)+24<128. The result is normal f32 in both cases; remainder*2 fits u128"
+)]
+fn rational_f32<const WIDE: bool>(value: Unpacked) -> f32 {
     let numerator = value.coeff;
     let k = value.exp.unsigned_abs();
     let denominator = BINARY_POW5[k as usize];
@@ -195,13 +332,24 @@ fn rational_f32(value: Unpacked) -> f32 {
     } else {
         (numerator, denominator << -shift)
     };
-    let numerator = numerator as u64;
-    let denominator = denominator as u64;
-    let mut coefficient = (numerator / denominator) as u32;
-    let remainder = numerator % denominator;
-    coefficient += u32::from(
-        remainder * 2 > denominator || (remainder * 2 == denominator && coefficient & 1 != 0),
-    );
+    let (mut coefficient, increment) = if WIDE {
+        let quotient = (numerator / denominator) as u32;
+        let remainder = numerator % denominator;
+        (
+            quotient,
+            remainder * 2 > denominator || (remainder * 2 == denominator && quotient & 1 != 0),
+        )
+    } else {
+        let numerator = numerator as u64;
+        let denominator = denominator as u64;
+        let quotient = (numerator / denominator) as u32;
+        let remainder = numerator % denominator;
+        (
+            quotient,
+            remainder * 2 > denominator || (remainder * 2 == denominator && quotient & 1 != 0),
+        )
+    };
+    coefficient += u32::from(increment);
     if coefficient == 1 << 24 {
         coefficient >>= 1;
         exponent += 1;
@@ -310,6 +458,20 @@ pub(crate) fn from_f64<W: Width>(value: f64) -> Converted<W> {
     from_bits::<W, false>(value.to_bits())
 }
 
+// m * 5^(27*floor(k/27)) for 999<=k<=1074 from the three cached powers.
+#[inline(never)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "999<=k<=1074 gives floor(k/27) in 37..=39, one of three cached powers"
+)]
+fn deep_subnormal_expansion(significand: u64, k: u32) -> DecimalInteger {
+    let (limbs, used) = BINARY_SUBNORMAL_POW5[(k / 27 - 37) as usize];
+    let mut integer = DecimalInteger { limbs, used };
+    integer.multiply(significand);
+    integer
+}
+
 pub(crate) fn from_f32<W: Width>(value: f32) -> Converted<W> {
     from_bits::<W, true>(u64::from(value.to_bits()))
 }
@@ -372,6 +534,10 @@ fn from_bits<W: Width, const SINGLE: bool>(bits: u64) -> Converted<W> {
     let mut integer = DecimalInteger::new(significand);
     if exponent < 0 {
         let mut remaining = exponent.unsigned_abs();
+        if remaining >= 999 {
+            integer = deep_subnormal_expansion(significand, remaining);
+            remaining %= 27;
+        }
         while remaining >= 27 {
             integer.multiply(BINARY_POW5[27] as u64);
             remaining -= 27;
