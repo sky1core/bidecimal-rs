@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "benchmark operand setup, outside the timed code; the library tables are crate-private"
+)]
+
 use crate::support::{Bid, decode_bid};
 use bidecimal::{Decimal32, Decimal64, Decimal128};
 use criterion::{BatchSize, Criterion, SamplingMode, Throughput};

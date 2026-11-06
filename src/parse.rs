@@ -401,7 +401,7 @@ const _: () = {
             match parse_eight(&bytes) {
                 Some(n) => {
                     assert!(value >= 48 && value <= 57);
-                    assert!(n == (value as u64 - 48) * 10_u64.pow(7 - pos as u32));
+                    assert!(n == (value as u64 - 48) * crate::tables::pow10_64(7 - pos as u32));
                 }
                 None => assert!(value < 48 || value > 57),
             }
@@ -410,10 +410,10 @@ const _: () = {
         pos += 1;
     }
     assert!(matches!(parse_eight(b"99999999"), Some(99_999_999)));
-    assert!(10_u32.pow(8) < u32::MAX);
+    assert!(crate::tables::pow10_64(8) < u32::MAX as u64);
 };
 
-const _: () = assert!(usize::BITS <= 64 && 10_u128.pow(35) < (1_u128 << 127));
+const _: () = assert!(usize::BITS <= 64 && crate::tables::pow10(35) < (1_u128 << 127));
 
 #[cfg(kani)]
 #[path = "parse_proofs.rs"]

@@ -546,7 +546,7 @@ bid_layout!(W32, decode_32, unpack_32, encode_32);
 bid_layout!(W64, decode_64, unpack_64, encode_64);
 bid_layout!(W128, decode_128, unpack_128, encode_128);
 
-const _: () = assert!(10_u128.pow(34) - 1 < (1_u128 << 113));
+const _: () = assert!(pow10(34) - 1 < (1_u128 << 113));
 
 #[inline]
 #[expect(

@@ -88,6 +88,13 @@
 #![cfg_attr(not(verus_keep_ghost), forbid(unsafe_code))]
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 #![deny(missing_docs)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_methods,
+        reason = "tests compute powers independently of the library tables"
+    )
+)]
 
 #[cfg(verus_keep_ghost)]
 #[allow(unused_imports)]

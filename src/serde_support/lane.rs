@@ -37,7 +37,8 @@ impl SmallValue {
         let integer = if exp == 0 {
             coeff
         } else {
-            coeff.checked_mul(10u64.checked_pow(u32::try_from(exp).ok()?)?)?
+            let k = u32::try_from(exp).ok().filter(|&k| k < 20)?;
+            coeff.checked_mul(crate::tables::pow10_64(k))?
         };
         if !neg {
             return Some(Self::Unsigned(integer));

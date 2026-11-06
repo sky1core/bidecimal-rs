@@ -709,7 +709,7 @@ fn eq_general(a: Unpacked, b: Unpacked) -> bool {
     }
 }
 
-const _: () = assert!(10_u128.pow(38) < (1_u128 << 127));
+const _: () = assert!(pow10(38) < (1_u128 << 127));
 
 #[inline]
 #[expect(
@@ -785,7 +785,7 @@ pub(crate) fn canonical(value: Unpacked) -> (bool, u128, i32) {
     (value.neg, coeff, value.exp + zeros as i32)
 }
 
-const _: () = assert!((10_u128.pow(34) - 1) * 10_001 < (1_u128 << 127));
+const _: () = assert!((pow10(34) - 1) * 10_001 < (1_u128 << 127));
 
 #[inline]
 #[expect(

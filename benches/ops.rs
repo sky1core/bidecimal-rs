@@ -96,6 +96,10 @@ fn plain_text(spec: Spec) -> String {
 /// the text writes a positive exponent as trailing zeros, so its preferred
 /// exponent is 0, and the result takes the representable exponent closest to
 /// it.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "benchmark operand setup, outside the timed code; the library tables are crate-private"
+)]
 fn parsed_fields(spec: Spec, digits: u32) -> Bid {
     if spec.exp <= 0 {
         return Bid {
@@ -517,6 +521,10 @@ fn comparison<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     });
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "benchmark operand setup, outside the timed code; the library tables are crate-private"
+)]
 fn trailing_zero_methods<T: Operate>(c: &mut Criterion) {
     let mut rng = SplitMix64(SEED ^ 0x7a11_1e00);
     let (qmin, qmax) = match T::WIDTH {

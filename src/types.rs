@@ -146,12 +146,12 @@ macro_rules! decimal_type {
             /// The largest finite value: (10^[`DIGITS`](Self::DIGITS) − 1) ×
             /// 10^[`MAX_EXP`](Self::MAX_EXP).
             pub const MAX: Self = Self(layout::$encode(
-                InRange::checked(false, 10_u128.pow(Self::DIGITS) - 1, Self::MAX_EXP as i128)
+                InRange::checked(false, crate::tables::pow10(Self::DIGITS) - 1, Self::MAX_EXP as i128)
                     .expect("in range"),
             ));
             /// The least finite value: the negation of [`MAX`](Self::MAX).
             pub const MIN: Self = Self(layout::$encode(
-                InRange::checked(true, 10_u128.pow(Self::DIGITS) - 1, Self::MAX_EXP as i128)
+                InRange::checked(true, crate::tables::pow10(Self::DIGITS) - 1, Self::MAX_EXP as i128)
                     .expect("in range"),
             ));
             /// A quiet NaN with a positive sign and a zero payload.
@@ -166,7 +166,7 @@ macro_rules! decimal_type {
             const SIGNALING_BIT: $bits = 1 << (<$bits>::BITS - 7);
             const PAYLOAD_MASK: $bits = (1 << <$width as Width>::LAYOUT.trail_bits) - 1;
             const COEFFICIENT_MASK: $bits = (1 << (<$width as Width>::LAYOUT.trail_bits + 3)) - 1;
-            const MAX_PAYLOAD: $bits = (10_u128.pow(Self::DIGITS - 1) - 1) as $bits;
+            const MAX_PAYLOAD: $bits = (crate::tables::pow10(Self::DIGITS - 1) - 1) as $bits;
             const EMIN: i32 = Self::MIN_EXP + Self::DIGITS as i32 - 1;
 
             /// Returns the canonical BID encoding of this value.
@@ -916,7 +916,7 @@ macro_rules! decimal_type {
             )]
             pub fn to_coefficient_and_exponent(self) -> Result<($int, i32), Error> {
                 const {
-                    assert!(10_u128.pow(Self::DIGITS) - 1 <= <$int>::MAX as u128);
+                    assert!(crate::tables::pow10(Self::DIGITS) - 1 <= <$int>::MAX as u128);
                     assert!(Self::MIN_EXP > i32::MIN && Self::MAX_EXP > i32::MIN);
                 }
                 if self.is_special() {

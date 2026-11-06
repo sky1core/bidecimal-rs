@@ -30,7 +30,11 @@ impl PgNumeric {
         }
         let align = exponent.rem_euclid(4) as u32;
         // At most 34+3 digits, which fits u128 and ten base-10000 groups.
-        let mut coefficient = coefficient * 10_u128.pow(align);
+        let mut coefficient = if align == 0 {
+            coefficient
+        } else {
+            coefficient * crate::tables::pow10(align)
+        };
         let mut low_weight = i64::from(exponent).div_euclid(4);
         while coefficient.is_multiple_of(10000) {
             coefficient /= 10000;
@@ -102,7 +106,7 @@ pub(crate) fn decode<D: DbDecimal>(bytes: &[u8]) -> Result<D, Error> {
         // The server truncates hidden fractional digits. Reject those inputs
         // instead of silently accepting a lossy numeric value.
         let hidden = (-i64::from(scale) - 4 * (weight - i as i64)).clamp(0, 4) as u32;
-        if !digit.is_multiple_of(10_u16.pow(hidden)) {
+        if hidden != 0 && !u64::from(digit).is_multiple_of(crate::tables::pow10_64(hidden)) {
             return Err(Error::InvalidInput);
         }
         // Preserve exactly the first 35 significant decimal positions.

@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "benchmark operand setup, outside the timed code; the library tables are crate-private"
+)]
+
 use num_bigint::BigInt;
 use std::cmp::Ordering;
 

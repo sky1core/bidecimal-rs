@@ -29,6 +29,8 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Clippy with serde
         run: cargo clippy --all-targets --locked --features serde -- -D warnings
+      - name: Clippy with all features
+        run: cargo clippy --all-targets --locked --all-features -- -D warnings
       - name: Test
         run: cargo test --locked
       - name: Test serde
