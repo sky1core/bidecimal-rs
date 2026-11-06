@@ -65,10 +65,27 @@ harnesses=(
     parse::proofs::parse_32_fast_path_len8
     parse::proofs::parse_32_fast_path_len9
     parse::proofs::parse_64_fast_path_len8
+    parse::proofs::parse_32_decimal_fast_path_len0
+    parse::proofs::parse_32_decimal_fast_path_len1
+    parse::proofs::parse_32_decimal_fast_path_len2
+    parse::proofs::parse_32_decimal_fast_path_len3
+    parse::proofs::parse_32_decimal_fast_path_len4
+    parse::proofs::parse_32_decimal_fast_path_len5
+    parse::proofs::parse_32_decimal_fast_path_len6
+    parse::proofs::parse_32_decimal_fast_path_len7
+    parse::proofs::parse_32_decimal_fast_path_len8
+    parse::proofs::parse_32_decimal_fast_path_len9
+    parse::proofs::parse_64_decimal_fast_path_len8
     parse::proofs::parse_eight_reads_eight_ascii_digits
     parse::proofs::point_lane_constant
     parse::proofs::zero_lanes_marks_exactly_the_zero_bytes
 )
+
+expected_count=75
+if [[ "${#harnesses[@]}" -ne "$expected_count" ]]; then
+    echo "Kani suite definition error: expected $expected_count harnesses, found ${#harnesses[@]}" >&2
+    exit 1
+fi
 
 args=()
 for harness in "${harnesses[@]}"; do
@@ -83,9 +100,9 @@ cargo kani -Z stubbing -Z unstable-options \
     --harness-timeout 30m -j 3 --output-format=terse \
     --exact "${args[@]}" 2>&1 | tee "$log" || status=$?
 
-expected="Complete - ${#harnesses[@]} successfully verified harnesses, 0 failures, ${#harnesses[@]} total."
+expected="Complete - $expected_count successfully verified harnesses, 0 failures, $expected_count total."
 if [[ $status -ne 0 ]] || ! grep -qxF "$expected" "$log"; then
     echo "Kani suite failed: expected \"$expected\"" >&2
     exit 1
 fi
-echo "Kani suite passed: ${#harnesses[@]} harnesses"
+echo "Kani suite passed: $expected_count harnesses"

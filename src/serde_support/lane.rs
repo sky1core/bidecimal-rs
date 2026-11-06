@@ -9,7 +9,7 @@
 use core::fmt;
 
 /// Eligible narrow serde text, classified before any formatting buffer exists.
-pub(super) enum SmallValue {
+pub(crate) enum SmallValue {
     Unsigned(u64),
     Signed(i64),
     NegativeZero,
@@ -18,7 +18,7 @@ pub(super) enum SmallValue {
 
 impl SmallValue {
     #[inline]
-    pub(super) fn new(neg: bool, coeff: u64, exp: i32) -> Option<Self> {
+    pub(crate) fn new(neg: bool, coeff: u64, exp: i32) -> Option<Self> {
         if exp < 0 {
             // A u64 has at most 20 digits. An interior point needs at most
             // 22 bytes; a leading point needs sign + 2 + abs(exp) bytes.
@@ -52,25 +52,105 @@ impl SmallValue {
     }
 }
 
+// Static finishing policy. Assembly remains in one generic helper body;
+// the text specialization retains checked UTF-8 inside that helper.
+trait FractionOutput {
+    type Output: ?Sized;
+    fn finish(bytes: &[u8]) -> Option<&Self::Output>;
+}
+
+#[cfg(feature = "serde")]
+struct TextOutput;
+#[cfg(feature = "serde")]
+impl FractionOutput for TextOutput {
+    type Output = str;
+    #[inline(always)]
+    fn finish(bytes: &[u8]) -> Option<&str> {
+        core::str::from_utf8(bytes).ok()
+    }
+}
+
+#[cfg(any(
+    feature = "sqlx-0_9-mysql",
+    feature = "diesel-2-mysql",
+    feature = "mysql_common-0_37",
+    all(
+        test,
+        any(
+            feature = "sqlx-0_9-postgres",
+            feature = "diesel-2-postgres",
+            feature = "postgres-types-0_2"
+        )
+    )
+))]
+struct BytesOutput;
+#[cfg(any(
+    feature = "sqlx-0_9-mysql",
+    feature = "diesel-2-mysql",
+    feature = "mysql_common-0_37",
+    all(
+        test,
+        any(
+            feature = "sqlx-0_9-postgres",
+            feature = "diesel-2-postgres",
+            feature = "postgres-types-0_2"
+        )
+    )
+))]
+impl FractionOutput for BytesOutput {
+    type Output = [u8];
+    #[inline(always)]
+    fn finish(bytes: &[u8]) -> Option<&[u8]> {
+        Some(bytes)
+    }
+}
+
 /// Per-call storage for the SWAR fractional lane.
 /// The prezeroed fraction buffer is never shared across calls.
-pub(super) struct SmallText {
+pub(crate) struct SmallText {
     bytes: [u8; 48],
 }
 
 impl SmallText {
-    pub(super) const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self { bytes: [b'0'; 48] }
     }
 
     /// Once classified, assembly failure is an error, never a fallback miss.
+    #[cfg(feature = "serde")]
     #[inline]
-    pub(super) fn text(&mut self, neg: bool, coeff: u64, exp: i32) -> Result<&str, fmt::Error> {
-        self.fraction(neg, coeff, exp).ok_or(fmt::Error)
+    pub(crate) fn text(&mut self, neg: bool, coeff: u64, exp: i32) -> Result<&str, fmt::Error> {
+        self.fraction::<TextOutput>(neg, coeff, exp)
+            .ok_or(fmt::Error)
+    }
+
+    /// Same checked assembly, finished as bytes for byte-only MySQL sinks.
+    #[cfg(any(
+        feature = "sqlx-0_9-mysql",
+        feature = "diesel-2-mysql",
+        feature = "mysql_common-0_37",
+        all(
+            test,
+            any(
+                feature = "sqlx-0_9-postgres",
+                feature = "diesel-2-postgres",
+                feature = "postgres-types-0_2"
+            )
+        )
+    ))]
+    #[inline]
+    pub(crate) fn bytes(&mut self, neg: bool, coeff: u64, exp: i32) -> Result<&[u8], fmt::Error> {
+        self.fraction::<BytesOutput>(neg, coeff, exp)
+            .ok_or(fmt::Error)
     }
 
     #[inline]
-    fn fraction(&mut self, neg: bool, coeff: u64, exp: i32) -> Option<&str> {
+    fn fraction<F: FractionOutput>(
+        &mut self,
+        neg: bool,
+        coeff: u64,
+        exp: i32,
+    ) -> Option<&F::Output> {
         let n = coeff
             .checked_ilog10()
             .map_or(Some(1), |n| usize::try_from(n).ok()?.checked_add(1))?;
@@ -99,7 +179,7 @@ impl SmallText {
         if neg {
             *self.bytes.get_mut(start)? = b'-';
         }
-        core::str::from_utf8(self.bytes.get(start..)?).ok()
+        F::finish(self.bytes.get(start..)?)
     }
 }
 
@@ -147,7 +227,7 @@ fn small_blocks(coeff: u64, n: usize, bytes: &mut [u8; 48]) -> Option<()> {
     Some(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "serde"))]
 #[allow(
     clippy::arithmetic_side_effects,
     clippy::unwrap_used,

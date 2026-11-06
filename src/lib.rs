@@ -118,8 +118,26 @@ pub use ordered::OrderedDecimal;
 pub use rounding::Rounding;
 pub use types::{Decimal32, Decimal64, Decimal128, Stripped};
 
-#[cfg(test)]
+#[cfg(any(
+    test,
+    feature = "sqlx-0_9-mysql",
+    feature = "diesel-2-mysql",
+    feature = "mysql_common-0_37",
+    feature = "sqlx-0_9-postgres",
+    feature = "diesel-2-postgres",
+    feature = "postgres-types-0_2"
+))]
 extern crate std;
+
+#[cfg(any(
+    feature = "sqlx-0_9-mysql",
+    feature = "diesel-2-mysql",
+    feature = "mysql_common-0_37",
+    feature = "sqlx-0_9-postgres",
+    feature = "diesel-2-postgres",
+    feature = "postgres-types-0_2"
+))]
+mod database;
 
 #[cfg(test)]
 mod addsub_tests;

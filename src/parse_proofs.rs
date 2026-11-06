@@ -65,13 +65,16 @@ fn point_lane_constant() {
 }
 
 #[allow(dead_code)]
-fn fallback<W: Width>(_s: &str, _dir: Option<Rounding>) -> Result<InRange<W>, Error> {
+fn fallback<W: Width, const ALLOW_EXPONENT: bool>(
+    _s: &str,
+    _dir: Option<Rounding>,
+) -> Result<InRange<W>, Error> {
     kani::assume(false);
     unreachable!()
 }
 
 #[allow(dead_code)]
-fn chunk_fallback<W: Width>(
+fn chunk_fallback<W: Width, const ALLOW_EXPONENT: bool>(
     _s: &str,
     _neg: bool,
     _bytes: &[u8],
@@ -140,7 +143,7 @@ macro_rules! fast_path_proofs {
     ($parse:ident, $width:ty, $($name:ident = $len:literal),* $(,)?) => {
         $(
             #[kani::proof]
-            #[kani::stub(super::parse_general, fallback)]
+            #[kani::stub(super::parse_general_with_grammar, fallback)]
             #[kani::stub(super::parse_chunks, chunk_fallback)]
             #[kani::unwind(20)]
             fn $name() {
@@ -180,3 +183,26 @@ fast_path_proofs!(
 );
 
 fast_path_proofs!(parse_64, W64, parse_64_fast_path_len8 = 8,);
+
+// Exercise the same validated fast paths with database exponent grammar too.
+fn parse_32_decimal(s: &str, dir: Option<Rounding>) -> Result<InRange<W32>, Error> {
+    super::parse_32_with_grammar::<false>(s, dir)
+}
+fn parse_64_decimal(s: &str, dir: Option<Rounding>) -> Result<InRange<W64>, Error> {
+    super::parse_64_with_grammar::<false>(s, dir)
+}
+fast_path_proofs!(
+    parse_32_decimal,
+    W32,
+    parse_32_decimal_fast_path_len0 = 0,
+    parse_32_decimal_fast_path_len1 = 1,
+    parse_32_decimal_fast_path_len2 = 2,
+    parse_32_decimal_fast_path_len3 = 3,
+    parse_32_decimal_fast_path_len4 = 4,
+    parse_32_decimal_fast_path_len5 = 5,
+    parse_32_decimal_fast_path_len6 = 6,
+    parse_32_decimal_fast_path_len7 = 7,
+    parse_32_decimal_fast_path_len8 = 8,
+    parse_32_decimal_fast_path_len9 = 9,
+);
+fast_path_proofs!(parse_64_decimal, W64, parse_64_decimal_fast_path_len8 = 8,);

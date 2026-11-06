@@ -845,13 +845,14 @@ proof-result files are committed.
 ### Direct Kani harnesses
 
 The harnesses in `src/layout_proofs.rs`, `src/kernel_proofs.rs` and
-`src/parse_proofs.rs` are compiled only under `cfg(kani)`. The suite contains
-64 harnesses. The final implementation after the accepted changes and
-retired-proof cleanup passed all 64 on 2026-10-31 using Kani 0.68.0
+`src/parse_proofs.rs` are compiled only under `cfg(kani)`. The current suite
+contains 75 harnesses, including 11 Decimal32/Decimal64 database-grammar
+fast-path harnesses. On 2026-11-05, the harness list and checks of
+`verification/kani-suite.sh`, run with `-j 2` instead of its `-j 3`, passed all
+75 harnesses for the current source on aarch64 macOS using Kani 0.68.0. A historical run
+on 2026-10-31 passed the 64 harnesses listed at that time using Kani 0.68.0
 (CBMC 6.11.0, `nightly-2026-08-21-x86_64-unknown-linux-gnu`) on Linux x86_64.
-This is Kani's own toolchain, not the stable toolchain in
-`rust-toolchain.toml`. This result is not
-an aarch64 execution result.
+Kani uses its own toolchain, not the stable toolchain in `rust-toolchain.toml`.
 Each row is a direct proof of the Rust code over the stated domain and nothing
 more. The files contain only the harnesses listed in the two tables below.
 
@@ -903,8 +904,9 @@ the proof.
 
 | Harness | Domain | Property | Stub | Outside the proof | Tool |
 |---|---|---|---|---|---|
-| `parse::proofs::parse_32_fast_path_len0` through `parse::proofs::parse_32_fast_path_len9` | every ASCII string of length 0 to 9, every direction and no direction; together these are every length the Decimal32 fast path handles before it passes longer input to `parse_chunks` | A fast-path `Ok` has the sign, coefficient and exponent of the plain decimal reading of the string, with a coefficient below `10^7`; a fast-path `InvalidInput` occurs only for an invalid string whose body is at most one byte; no other error is produced. | `parse_general` and `parse_chunks` are replaced by `kani::assume(false)` | non-ASCII bytes; every input that reaches `parse_general` or `parse_chunks`, and those parsers themselves | Kani 0.68.0 / CBMC 6.11.0 |
-| `parse::proofs::parse_64_fast_path_len8` | every ASCII string of length 8, every direction and no direction | The same property for `parse_64`, with a coefficient below `10^16`. | `parse_general` and `parse_chunks` are replaced by `kani::assume(false)` | non-ASCII bytes; every other length; every input that reaches `parse_general` or `parse_chunks`, and those parsers themselves | Kani 0.68.0 / CBMC 6.11.0 |
+| `parse::proofs::parse_32_fast_path_len0` through `parse::proofs::parse_32_fast_path_len9` | every ASCII string of length 0 to 9, every direction and no direction; together these are every length the Decimal32 fast path handles before it passes longer input to `parse_chunks` | A fast-path `Ok` has the sign, coefficient and exponent of the plain decimal reading of the string, with a coefficient below `10^7`; a fast-path `InvalidInput` occurs only for an invalid string whose body is at most one byte; no other error is produced. | `parse_general_with_grammar` and `parse_chunks` are replaced by `kani::assume(false)` | non-ASCII bytes; every input that reaches `parse_general_with_grammar` or `parse_chunks`, and those parsers themselves | Kani 0.68.0 / CBMC 6.11.0 |
+| `parse::proofs::parse_64_fast_path_len8` | every ASCII string of length 8, every direction and no direction | The same property for `parse_64`, with a coefficient below `10^16`. | `parse_general_with_grammar` and `parse_chunks` are replaced by `kani::assume(false)` | non-ASCII bytes; every other length; every input that reaches `parse_general_with_grammar` or `parse_chunks`, and those parsers themselves | Kani 0.68.0 / CBMC 6.11.0 |
+| `parse::proofs::parse_32_decimal_fast_path_len0` through `parse::proofs::parse_32_decimal_fast_path_len9`, `parse::proofs::parse_64_decimal_fast_path_len8` | every ASCII string of length 0 to 9 for Decimal32 and length 8 for Decimal64, every rounding direction and no direction | The database grammar (`ALLOW_EXPONENT=false`) fast-path results match the plain decimal reading: sign, coefficient and exponent agree, the coefficient stays below the width's precision limit, and `InvalidInput` occurs only for invalid text whose body is at most one byte. | `parse_general_with_grammar` and `parse_chunks` are replaced by `kani::assume(false)` | non-ASCII bytes; inputs that reach either fallback, and the fallback parsers themselves | Kani 0.68.0 / CBMC 6.11.0 |
 
 ### Direct Verus proofs
 
@@ -2400,3 +2402,85 @@ uses the production transformations. There is no exhaustive enumeration of
 all strings or Decimal64/Decimal128 format/parse values; parsing and formatting
 use the bounded recurrence and path-class proofs plus independent differential
 evidence. Performance remains uncovered.
+
+## Database integration verification
+
+The implementation uses optional versioned adapter features and a separate
+`db-integration` workspace member. Default workspace tests do not require a
+running database or a native client. The shared codec has no runtime dependencies;
+Diesel's library features enable only backend traits, not connection linkage.
+
+### Reproducible checks
+
+Run formatting, all-feature/all-target Clippy, default and serde tests, and
+individual adapter feature checks with the toolchain in `rust-toolchain.toml`:
+
+```sh
+cargo fmt --check
+cargo clippy --offline --locked --all-targets --all-features -- -D warnings
+cargo test --offline --locked
+cargo test --offline --locked --features serde
+for feature in sqlx-0_9-mysql diesel-2-mysql mysql_common-0_37 sqlx-0_9-postgres diesel-2-postgres postgres-types-0_2; do
+    cargo check --offline --locked --all-targets --no-default-features --features "$feature"
+done
+cargo build --offline --locked --lib --target x86_64-unknown-none
+```
+
+Protocol boundaries and malformed inputs use independent unit-test oracles.
+The PostgreSQL codec tests include the checked-in PostgreSQL 18.6 `numeric_send`
+vectors and run with any PostgreSQL adapter feature, for example:
+
+```sh
+cargo test --offline --locked --features postgres-types-0_2 --lib database::pg_tests -- --test-threads=2
+```
+
+### Client conversion benchmarks
+
+The repository's Criterion benchmarks measure client conversion and driver
+buffer operations, excluding network, SQL execution and server casts. Run
+untimed fixture and baseline checks before collecting timings:
+
+```sh
+cargo bench --offline --locked --bench database --features "sqlx-0_9-mysql mysql_common-0_37 diesel-2-mysql" -- --test
+cargo bench --offline --locked --bench database_postgres --features "sqlx-0_9-postgres postgres-types-0_2 diesel-2-postgres" -- --test
+```
+
+Omit `-- --test` to measure with the checked-in bench profile and development
+toolchain. Each benchmark uses 30 samples, 100 ms warm-up and a 250 ms
+measurement target. Both backends use the same six short/long fixtures across
+Decimal32, Decimal64 and Decimal128. These measurements do not establish
+server performance or universal performance parity.
+
+### Real-server verification
+
+On 2026-11-05, `bash scripts/db-integration.sh all` ran from 21:19:38 to
+21:30:48 UTC on an aarch64 macOS Docker host, exit 0. Each database stage used
+a freshly generated password. Later changes write the same runner URLs as
+plain strings and leave the database adapter and shared codec code
+unchanged. All eight driver suites
+passed (8/8): MySQL SQLx, Diesel, mysql sync and mysql_async, and PostgreSQL
+SQLx, Diesel, postgres sync and tokio-postgres. The containers used pinned
+MySQL 9.7.4 and PostgreSQL 18.6 images. The command, pinned images, native
+client setup and version assertions are documented in
+[the live-test instructions](../db-integration/README.md).
+
+On 2026-11-05, the `verification/kani-suite.sh` harnesses passed 75/75 for
+the current source on aarch64 macOS with Kani 0.68.0, run with `-j 2`,
+including the database-grammar fast-path harnesses described under Direct
+Kani harnesses.
+
+### MySQL context-free server evaluation
+
+On 2026-11-05, using an earlier revision of this integration on MySQL 9.7.4 with
+`STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION`, measured parameter expressions
+`? * 2`, `? + 0`, and `?` for inputs `12345678901234567890.1` and
+`0.1000000000000000001` numerically matched the corresponding decimal-literal
+expressions in all 24 cases across SQLx, Diesel, mysql, and mysql_async.
+Results were observed through `CAST(... AS CHAR)`; 8 result strings matched
+byte-for-byte and 16 differed only in fractional trailing zeros. The live
+MySQL suites log these measurements as `CONTEXT_FREE` observations.
+These observations do not determine the server's internal evaluation type or
+establish the behavior of other inputs or expressions.
+
+Real-server tests use actual driver APIs, typed errors and explicit missing-URL
+failure. A successful suite is not a proof for every server version or input.

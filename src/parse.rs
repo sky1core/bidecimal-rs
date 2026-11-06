@@ -10,6 +10,27 @@ use crate::kernel::{Wide, fit};
 use crate::layout::{InRange, W32, W64, Width};
 use crate::{Error, Rounding};
 
+// Ordinary entry points retain their signatures and always select the original
+// exponent grammar. These wrappers inline into existing callers; the general
+// implementation retains its original out-of-line boundary below.
+#[inline(always)]
+pub(crate) fn parse<W: Width>(s: &str, dir: Option<Rounding>) -> Result<InRange<W>, Error> {
+    parse_with_grammar::<W, true>(s, dir)
+}
+#[inline(always)]
+pub(crate) fn parse_32(s: &str, dir: Option<Rounding>) -> Result<InRange<W32>, Error> {
+    parse_32_with_grammar::<true>(s, dir)
+}
+#[inline(always)]
+pub(crate) fn parse_64(s: &str, dir: Option<Rounding>) -> Result<InRange<W64>, Error> {
+    parse_64_with_grammar::<true>(s, dir)
+}
+#[cfg(any(test, kani))]
+#[inline(always)]
+pub(crate) fn parse_general<W: Width>(s: &str, dir: Option<Rounding>) -> Result<InRange<W>, Error> {
+    parse_general_with_grammar::<W, true>(s, dir)
+}
+
 const EXP_LIMIT: i128 = 1_i128 << 64;
 const SCALE_LIMIT: i128 = 1_i128 << 40;
 
@@ -23,9 +44,12 @@ fn split_sign(s: &str) -> (bool, &[u8]) {
 }
 
 #[inline(always)]
-pub(crate) fn parse<W: Width>(s: &str, dir: Option<Rounding>) -> Result<InRange<W>, Error> {
+pub(crate) fn parse_with_grammar<W: Width, const ALLOW_EXPONENT: bool>(
+    s: &str,
+    dir: Option<Rounding>,
+) -> Result<InRange<W>, Error> {
     let (neg, bytes) = split_sign(s);
-    parse_chunks(s, neg, bytes, dir)
+    parse_chunks::<_, ALLOW_EXPONENT>(s, neg, bytes, dir)
 }
 
 #[inline(always)]
@@ -33,10 +57,13 @@ pub(crate) fn parse<W: Width>(s: &str, dir: Option<Rounding>) -> Result<InRange<
     clippy::arithmetic_side_effects,
     reason = "the SWAR path has 1..=8 bytes, so the pad 8*(8-len) is in 0..=56; the point lane is in 0..=7 because without a point trailing_zeros(0)/8 is 8 and & 7 maps it to 0, so both lane shifts are <=63 and the removed word computed in that case is unused; lane-7 fits i32, and (1<<pad)-1 and (1<<8*lane)-1 cannot underflow"
 )]
-pub(crate) fn parse_32(s: &str, dir: Option<Rounding>) -> Result<InRange<W32>, Error> {
+pub(crate) fn parse_32_with_grammar<const ALLOW_EXPONENT: bool>(
+    s: &str,
+    dir: Option<Rounding>,
+) -> Result<InRange<W32>, Error> {
     let (neg, bytes) = split_sign(s);
     if bytes.len() > 8 {
-        return parse_chunks(s, neg, bytes, dir);
+        return parse_chunks::<_, ALLOW_EXPONENT>(s, neg, bytes, dir);
     }
     let len = bytes.len();
     if len == 0 {
@@ -46,7 +73,7 @@ pub(crate) fn parse_32(s: &str, dir: Option<Rounding>) -> Result<InRange<W32>, E
     let word = (load_short(bytes) << pad) | (LANE_ZERO & ((1_u64 << pad) - 1));
     let point = zero_lanes(word ^ LANE_POINT);
     if point & point.wrapping_sub(1) != 0 {
-        return parse_general(s, dir);
+        return parse_general_with_grammar::<_, ALLOW_EXPONENT>(s, dir);
     }
     if len == usize::from(point != 0) {
         return Err(Error::InvalidInput);
@@ -65,7 +92,7 @@ pub(crate) fn parse_32(s: &str, dir: Option<Rounding>) -> Result<InRange<W32>, E
     {
         return Ok(value);
     }
-    parse_general(s, dir)
+    parse_general_with_grammar::<_, ALLOW_EXPONENT>(s, dir)
 }
 
 #[inline(always)]
@@ -73,17 +100,20 @@ pub(crate) fn parse_32(s: &str, dir: Option<Rounding>) -> Result<InRange<W32>, E
     clippy::arithmetic_side_effects,
     reason = "the SWAR path has 8..=17 bytes and moves the first of 17 into the lead, so the body has 8..=16 bytes and the pad 8*(16-len) is in 0..=64 < 128, where (1<<pad)-1 cannot underflow; the point lane is in 0..=15 because without a point trailing_zeros(0)/8 is 16 and & 15 maps it to 0, so the lane shifts are at most 120 and lane-15 fits i32; nibbles are at most 0x0f per lane, so adding 0x06 per lane cannot carry out of the word; validated lanes are digits, so pair, quad and half sums stay below 100, 10^4 and 10^8 within their lanes, and the coefficient is below 10^16"
 )]
-pub(crate) fn parse_64(s: &str, dir: Option<Rounding>) -> Result<InRange<W64>, Error> {
+pub(crate) fn parse_64_with_grammar<const ALLOW_EXPONENT: bool>(
+    s: &str,
+    dir: Option<Rounding>,
+) -> Result<InRange<W64>, Error> {
     let (neg, bytes) = split_sign(s);
     if !(8..=17).contains(&bytes.len()) {
-        return parse_chunks(s, neg, bytes, dir);
+        return parse_chunks::<_, ALLOW_EXPONENT>(s, neg, bytes, dir);
     }
     let (lead, body) = match bytes.split_first() {
         Some((&lead, body)) if bytes.len() == 17 => (lead, body),
         _ => (b'0', bytes),
     };
     let (Some(first), Some(last)) = (body.first_chunk::<8>(), body.last_chunk::<8>()) else {
-        return parse_chunks(s, neg, bytes, dir);
+        return parse_chunks::<_, ALLOW_EXPONENT>(s, neg, bytes, dir);
     };
     let pad = 8 * (16 - body.len()) as u32;
     let fill = ((1_u128 << pad) - 1) as u64;
@@ -93,7 +123,7 @@ pub(crate) fn parse_64(s: &str, dir: Option<Rounding>) -> Result<InRange<W64>, E
     let point = u128::from(zero_lanes(head ^ LANE_POINT))
         | (u128::from(zero_lanes(tail ^ LANE_POINT)) << 64);
     if point & point.wrapping_sub(1) != 0 {
-        return parse_general(s, dir);
+        return parse_general_with_grammar::<_, ALLOW_EXPONENT>(s, dir);
     }
     let lane = (point.trailing_zeros() / 8) & 15;
     let below = (1_u128 << (8 * lane)) - 1;
@@ -102,7 +132,7 @@ pub(crate) fn parse_64(s: &str, dir: Option<Rounding>) -> Result<InRange<W64>, E
     let (digits, exp) = match (point, lead) {
         (0, b'0') => (word, 0),
         (0, b'.') => (word, -16),
-        (0, _) => return parse_chunks(s, neg, bytes, dir),
+        (0, _) => return parse_chunks::<_, ALLOW_EXPONENT>(s, neg, bytes, dir),
         _ => (removed, lane as i32 - 15),
     };
     let nibbles = digits & 0x0f0f_0f0f_0f0f_0f0f_0f0f_0f0f_0f0f_0f0f;
@@ -128,7 +158,7 @@ pub(crate) fn parse_64(s: &str, dir: Option<Rounding>) -> Result<InRange<W64>, E
             return Ok(value);
         }
     }
-    parse_general(s, dir)
+    parse_general_with_grammar::<_, ALLOW_EXPONENT>(s, dir)
 }
 
 #[inline(always)]
@@ -136,14 +166,14 @@ pub(crate) fn parse_64(s: &str, dir: Option<Rounding>) -> Result<InRange<W64>, E
     clippy::arithmetic_side_effects,
     reason = "at most 35 bytes give coeff < 10^35 < 2^127; validated chunks are <10^8; after chunk scanning each digit run has <=7 bytes, so tail <10^7 and factor <=10^7 fit u32; ASCII guards protect subtraction, and remaining length <=35 fits i32"
 )]
-fn parse_chunks<W: Width>(
+fn parse_chunks<W: Width, const ALLOW_EXPONENT: bool>(
     s: &str,
     neg: bool,
     mut bytes: &[u8],
     dir: Option<Rounding>,
 ) -> Result<InRange<W>, Error> {
     if bytes.len() > 35 {
-        return parse_general(s, dir);
+        return parse_general_with_grammar::<_, ALLOW_EXPONENT>(s, dir);
     }
     let len = bytes.len();
     let mut coeff = 0_u128;
@@ -175,7 +205,7 @@ fn parse_chunks<W: Width>(
                 exp = -(rest.len() as i32);
                 bytes = rest;
             }
-            _ => return parse_general(s, dir),
+            _ => return parse_general_with_grammar::<_, ALLOW_EXPONENT>(s, dir),
         }
     }
     if len <= usize::from(point) {
@@ -184,7 +214,7 @@ fn parse_chunks<W: Width>(
     if let Some(value) = InRange::checked(neg, coeff, i128::from(exp)) {
         return Ok(value);
     }
-    parse_general(s, dir)
+    parse_general_with_grammar::<_, ALLOW_EXPONENT>(s, dir)
 }
 
 #[expect(
@@ -192,7 +222,10 @@ fn parse_chunks<W: Width>(
     reason = "at most 35 significant digits give coeff < 10^35 < 2^127; each digit subtraction is guarded by ASCII range. Counts <= input length <= isize::MAX <= 2^63-1; written exponent <= 2^64 and its next step <= 10*2^64+9, so all i128 arithmetic fits. Clamping is monotone, preferred <= wide exponent; sticky requires 35 retained digits, hence coeff >= 10^34 >= 10^(P-1) for P=7/16/34"
 )]
 #[inline(never)]
-pub(crate) fn parse_general<W: Width>(s: &str, dir: Option<Rounding>) -> Result<InRange<W>, Error> {
+pub(crate) fn parse_general_with_grammar<W: Width, const ALLOW_EXPONENT: bool>(
+    s: &str,
+    dir: Option<Rounding>,
+) -> Result<InRange<W>, Error> {
     let mut bytes = s.bytes().peekable();
     let neg = match bytes.peek() {
         Some(b'-') => {
@@ -241,7 +274,7 @@ pub(crate) fn parse_general<W: Width>(s: &str, dir: Option<Rounding>) -> Result<
     }
     let mut written = 0_i128;
     if let Some(byte) = bytes.next() {
-        if byte != b'e' && byte != b'E' {
+        if !ALLOW_EXPONENT || (byte != b'e' && byte != b'E') {
             return Err(Error::InvalidInput);
         }
         let exp_neg = match bytes.peek() {

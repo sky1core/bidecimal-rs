@@ -6,6 +6,9 @@
     clippy::panic
 )]
 
+#[cfg(any(feature = "diesel-2-mysql", feature = "diesel-2-postgres"))]
+use diesel_2 as diesel;
+
 use core::cmp::Ordering;
 use core::hash::Hasher;
 use core::num::FpCategory;
@@ -121,6 +124,8 @@ macro_rules! decimal_type {
         /// trailing fractional zeros.
         #[repr(transparent)]
         #[derive(Clone, Copy)]
+        #[cfg_attr(any(feature = "diesel-2-mysql", feature = "diesel-2-postgres"), derive(diesel_2::expression::AsExpression, diesel_2::deserialize::FromSqlRow))]
+        #[cfg_attr(any(feature = "diesel-2-mysql", feature = "diesel-2-postgres"), diesel(sql_type = diesel_2::sql_types::Numeric))]
         pub struct $name($bits);
 
         const _: () = assert!(core::mem::size_of::<$name>() == $bytes);
@@ -236,7 +241,15 @@ macro_rules! decimal_type {
 
             /// The value of an in-range finite result, encoded without the
             /// re-validation [`from_bits`](Self::from_bits) performs.
-            #[cfg(feature = "serde")]
+            #[cfg(any(
+                feature = "serde",
+                feature = "sqlx-0_9-mysql",
+                feature = "diesel-2-mysql",
+                feature = "mysql_common-0_37",
+                feature = "sqlx-0_9-postgres",
+                feature = "diesel-2-postgres",
+                feature = "postgres-types-0_2"
+            ))]
             pub(crate) fn from_in_range(v: InRange<$width>) -> Self {
                 Self(layout::$encode(v))
             }

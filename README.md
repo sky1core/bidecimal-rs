@@ -134,7 +134,7 @@ the obligations without a direct machine proof are listed separately there.
 | Goal 1: exact or explicit | Met under the documented contract and verification limits | [VERIFICATION.md](docs/VERIFICATION.md): Integer obligations, Class coverage argument, Infinity and NaN |
 | Goal 2: proven correct | Met under the documented contract and verification limits | [VERIFICATION.md](docs/VERIFICATION.md): Integer obligations, Exhaustive and differential evidence, Class coverage argument, Infinity and NaN |
 | Goal 3: compact | Met | Compile-time size assertion for each type in `src/types.rs` |
-| Goal 4: pure Rust | Met | Only optional `serde` in `[dependencies]`, without default features; `#![no_std]` and `forbid(unsafe_code)` in `src/lib.rs` for every normal build (it is lifted only under the Verus verification cfg, see `docs/VERIFICATION.md`) |
+| Goal 4: pure Rust | Met | `#![no_std]` and `forbid(unsafe_code)` in `src/lib.rs` for every normal build (it is lifted only under the Verus verification cfg, see `docs/VERIFICATION.md`), so the library's own code has no FFI. No dependencies by default; every entry in `[dependencies]` is optional and without default features: `serde`, the versioned database adapter crates, and `flate2` and `bytes` for those adapters. With all features, the dependency tree for every target has no `cc`, `bindgen` or `pkg-config` crate; the database drivers' dependencies call operating-system APIs through binding crates such as `libc` and `windows-sys` |
 | Addition and subtraction | Met | [VERIFICATION.md](docs/VERIFICATION.md): Bounded-gap exact sum, Exact addition and subtraction, Compressed addition and subtraction |
 | Multiplication | Met | [VERIFICATION.md](docs/VERIFICATION.md): Exact product |
 | Division | Met | [VERIFICATION.md](docs/VERIFICATION.md): Division |
@@ -281,6 +281,61 @@ workflow compares the times and the code of the `ops`, `finite`, `keys`, and
 `special` targets and the instruction counts on x86-64 and ARM64 Linux; a
 manual run takes the timed targets and profile as inputs (default profile:
 `bench`). A slower result or a larger count is reported, not a failed check.
+
+## Database integration (optional)
+
+MySQL DECIMAL is supported through these versioned,
+default-off features: `sqlx-0_9-mysql` (SQLx 0.9), `diesel-2-mysql` (Diesel 2.3),
+and `mysql_common-0_37` (mysql 28 / mysql_async 0.37). All three decimal widths
+have driver traits. SQLx runtime `query().bind(decimal)` and typed row access
+work with DECIMAL columns. Diesel exposes Numeric expression/row traits.
+mysql_common parameters need explicit fallible conversion:
+
+```rust,ignore
+let parameter = mysql::Value::try_from(decimal)?;
+connection.exec_drop("INSERT INTO amounts (amount) VALUES (?)", (parameter,))?;
+```
+
+Read with the driver's fallible row/value API. `FromValue::from_value` is an
+upstream convenience method that may panic; prefer `from_value_opt` or
+`from_row_opt`. The adapter itself returns errors. Float/Double inputs are
+not accepted. mysql_common Bytes has no SQL metadata, so applications requiring a
+DECIMAL-only schema must check the column metadata too.
+
+Client conversions are exact and preserve fractional scale when representable.
+They do not prevent server column rounding or preserve negative-zero storage.
+In particular, strict MySQL mode does not prohibit fractional rounding.
+MySQL permits up to 65 total decimal digits and 30 fractional digits. Values
+outside that range and NaN/infinities are rejected before writing. A cohort
+whose trailing fractional zeros are the only excess is normalized by the
+existing trim_fraction_zeros method in the actual parameter bytes. SQLx advertises string parameters but accepts DECIMAL
+results only: an uncast `SELECT ?` string result is intentionally not a decimal
+round-trip. SQLx compile-time query macros need their usual custom-type
+annotations; runtime query APIs are covered by the integration harness.
+
+PostgreSQL NUMERIC adapters use `sqlx-0_9-postgres`, `diesel-2-postgres`,
+or `postgres-types-0_2` (shared by postgres and tokio-postgres). They encode
+base-10000 binary NUMERIC directly into the driver buffer and validate every
+incoming group before exact fitting. Scalar NUMERIC is supported; arrays and
+domains are not added here. SQLx also decodes its NUMERIC text protocol.
+Canonical payload-free positive quiet NaN and both infinities are supported;
+signed/payload/signaling NaNs are rejected on output. Wire zero is positive,
+and representable fractional scale is preserved.
+
+Library adapters require no native client. Diesel applications using
+MysqlConnection still require libmysqlclient. The mysql_common adapter selects
+flate2's Rust backend as specified for this feature; a downstream application's
+feature unification can additionally enable another compression backend.
+
+The shared text codec checks numeric range before formatting and reuses the
+existing serde short-value lane and Display Parts, with borrowed input and
+fixed coefficient-sized stack scratch. SQLx writes directly into its argument buffer; mysql_common must own
+its Value::Bytes Vec and Diesel owns its per-bind Vec. Buffer growth and driver
+metadata allocations are not claimed to be zero.
+
+See [database integration tests](db-integration/README.md) for live-server test
+commands and environment requirements, and [verification](docs/VERIFICATION.md#database-integration-verification)
+for recorded results and limits.
 
 ## License
 

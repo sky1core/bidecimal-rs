@@ -1,6 +1,6 @@
 use core::fmt;
 
-mod lane;
+pub(crate) mod lane;
 
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

@@ -12,13 +12,28 @@ categories = ["mathematics", "no-std::no-alloc"]
 include = ["/src", "/LICENSE-APACHE", "/LICENSE-MIT", "/README.md"]
 
 [workspace]
-members = ["bench-instructions"]
+members = ["bench-instructions", "db-integration"]
+default-members = ["."]
 
 [features]
 serde = ["dep:serde"]
+sqlx-0_9-mysql = ["dep:sqlx_0_9", "sqlx_0_9/mysql"]
+diesel-2-mysql = ["dep:diesel_2", "diesel_2/mysql_backend"]
+mysql_common-0_37 = ["dep:mysql_common_0_37", "dep:flate2"]
+sqlx-0_9-postgres = ["dep:sqlx_0_9", "sqlx_0_9/postgres"]
+diesel-2-postgres = ["dep:diesel_2", "diesel_2/postgres_backend"]
+postgres-types-0_2 = ["dep:postgres_types_0_2", "dep:bytes"]
 
 [dependencies]
 serde = { version = "1.0.229", default-features = false, optional = true }
+
+sqlx_0_9 = { package = "sqlx", version = "0.9", default-features = false, optional = true }
+diesel_2 = { package = "diesel", version = "2.3", default-features = false, optional = true }
+mysql_common_0_37 = { package = "mysql_common", version = "0.37", default-features = false, optional = true }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"], optional = true }
+
+postgres_types_0_2 = { package = "postgres-types", version = "0.2", default-features = false, optional = true }
+bytes = { version = "1.12", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
@@ -72,3 +87,13 @@ harness = false
 name = "serde"
 harness = false
 required-features = ["serde"]
+
+[[bench]]
+name = "database"
+harness = false
+required-features = ["sqlx-0_9-mysql", "mysql_common-0_37", "diesel-2-mysql"]
+
+[[bench]]
+name = "database_postgres"
+harness = false
+required-features = ["sqlx-0_9-postgres", "postgres-types-0_2", "diesel-2-postgres"]

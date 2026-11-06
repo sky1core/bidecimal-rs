@@ -24,7 +24,7 @@ The project succeeds when all of the following hold:
    supported input. A count of passing tests is not that evidence, and neither
    is having ported another implementation such as Intel BID or IBM decNumber.
 3. **Compact.** Each value occupies exactly 4, 8, or 16 bytes.
-4. **Pure Rust.** No C library and no FFI at run time.
+4. **Pure Rust.** The library itself uses no C library and no FFI at run time.
 
 ## Design Direction
 
@@ -500,6 +500,49 @@ exponent or NaN sign, payload, or signaling state.
   have the same stripped text; neither adds a serde helper nor a `Serialize`
   implementation for `Stripped<T>`.
 
+### Database integration
+
+Database adapters are optional, versioned features for Decimal32, Decimal64,
+and Decimal128. With all database features disabled, the core remains `no_std`
+with no runtime dependencies. The adapters do not store BID encodings, use
+binary floating-point intermediates, or depend on another decimal crate.
+
+Reads succeed only when the numeric value is exactly representable. A database
+fractional scale is preserved when possible; otherwise the same closest exact
+cohort policy as parsing applies. The scale of a zero can be clamped to the
+destination exponent range.
+
+MySQL adapters (`sqlx-0_9-mysql`, `diesel-2-mysql`, and `mysql_common-0_37`)
+write fixed-point decimal text. SQLx and mysql_common bind string-tagged
+parameters. Accepted values have a minimum fractional scale s <= 30 and
+integer digit count i such that i + s <= 65. The original scale is retained
+when it fits; otherwise fractional trailing zeros are removed and the minimum
+fractional scale is used. NaN and infinities are rejected. mysql_common writing
+is an explicit fallible `TryFrom<DecimalN> for Value`. Integer `Value::Int` and
+`Value::UInt` inputs are read exactly. Its read intermediate retains the original
+Value for rollback and rejects Float and Double values.
+
+PostgreSQL adapters (`sqlx-0_9-postgres`, `diesel-2-postgres`, and
+`postgres-types-0_2`) exchange scalar NUMERIC through its external binary
+base-10000 representation. SQLx also accepts NUMERIC text results. The binary
+codec validates framing, every digit group, sign and scale. For finite
+values it rejects nonzero fractional digits hidden beyond the declared scale.
+For special values, valid weight, scale and digit-body fields have no numeric
+meaning and are ignored after validation. Canonical positive payload-free quiet
+NaN and both infinities are supported; other NaN encodings are rejected on
+output. PostgreSQL zero is normalized to positive zero while its representable
+scale is preserved. Arrays and domains are outside this adapter contract.
+
+Adapters never round on the client. Database column precision/scale, CASTs,
+functions, arithmetic and triggers can change a value under server rules.
+SQL DECIMAL/NUMERIC storage normalizes negative zero to positive zero and
+cannot preserve the original positive-exponent cohort or input spelling.
+Errors travel through the driver's fallible error path rather than panics.
+
+Successful shared conversion performs no temporary heap allocations. Driver
+buffers may allocate. The library's Diesel feature does not link a native
+client.
+
 ## Verification
 
 Correctness evidence for every operation consists of all of the following,
@@ -534,7 +577,10 @@ A reduced sample is a preliminary observation, not evidence.
 
 ## Implementation Requirements
 
-- Pure Rust. No C library, FFI, or native code is linked into the library.
+- Pure Rust. The library itself contains no FFI and links no C library or
+  native code. Optional database features add only Rust crates and link no
+  native database client; those crates' own dependencies may call
+  operating-system APIs through binding crates such as `libc`.
 - Targets current stable Rust and makes full use of recent standard-library
   integer primitives: wide multiplication, bit width, unbounded shifts, and
   allocation-free integer formatting. Each use is justified by generated

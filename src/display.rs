@@ -213,8 +213,21 @@ impl Parts<'_> {
     }
 
     /// Writes the whole text, sign included.
-    #[cfg(feature = "serde")]
-    fn write_text(&self, out: &mut impl Write) -> fmt::Result {
+    #[cfg(any(
+        feature = "serde",
+        feature = "sqlx-0_9-mysql",
+        feature = "diesel-2-mysql",
+        feature = "mysql_common-0_37",
+        all(
+            test,
+            any(
+                feature = "sqlx-0_9-postgres",
+                feature = "diesel-2-postgres",
+                feature = "postgres-types-0_2"
+            )
+        )
+    ))]
+    pub(crate) fn write_text(&self, out: &mut impl Write) -> fmt::Result {
         if self.neg {
             out.write_char('-')?;
         }

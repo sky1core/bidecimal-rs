@@ -1,0 +1,45 @@
+[package]
+name = "bidecimal-db-integration"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[features]
+default = []
+runtime = ["dep:tokio"]
+mysql-tests = ["runtime"]
+postgres-tests = ["runtime"]
+mysql-sqlx = ["dep:sqlx", "sqlx/mysql", "sqlx/runtime-tokio", "mysql-tests", "bidecimal/sqlx-0_9-mysql"]
+mysql-diesel = ["dep:diesel", "diesel/mysql", "mysql-tests", "bidecimal/diesel-2-mysql"]
+mysql-sync = ["dep:mysql", "mysql-tests", "bidecimal/mysql_common-0_37"]
+mysql-async = ["dep:mysql_async", "mysql-tests", "bidecimal/mysql_common-0_37"]
+mysql-all = ["mysql-sqlx", "mysql-diesel", "mysql-sync", "mysql-async"]
+
+postgres-sqlx = ["dep:sqlx", "sqlx/postgres", "sqlx/runtime-tokio", "postgres-tests", "bidecimal/sqlx-0_9-postgres"]
+postgres-diesel = ["dep:diesel", "diesel/postgres", "postgres-tests", "bidecimal/diesel-2-postgres"]
+postgres-sync = ["dep:postgres", "dep:bytes", "postgres-tests", "bidecimal/postgres-types-0_2"]
+postgres-async = ["dep:tokio-postgres", "dep:bytes", "postgres-tests", "bidecimal/postgres-types-0_2"]
+postgres-all = ["postgres-sqlx", "postgres-diesel", "postgres-sync", "postgres-async"]
+
+[dependencies]
+bidecimal = { path = "..", default-features = false }
+sqlx = { version = "0.9", default-features = false, optional = true }
+diesel = { version = "2.3", default-features = false, optional = true }
+mysql = { version = "28.0", default-features = false, features = ["minimal-rust"], optional = true }
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"], optional = true }
+tokio = { version = "1", default-features = false, features = ["rt", "macros"], optional = true }
+
+bytes = { version = "1.12", default-features = false, optional = true }
+postgres = { version = "0.19.14", default-features = false, optional = true }
+tokio-postgres = { version = "0.7.18", default-features = false, features = ["runtime"], optional = true }
+
+[[test]]
+name = "mysql"
+path = "tests/mysql.rs"
+required-features = ["mysql-tests"]
+
+[[test]]
+name = "postgres"
+path = "tests/postgres.rs"
+required-features = ["postgres-tests"]
