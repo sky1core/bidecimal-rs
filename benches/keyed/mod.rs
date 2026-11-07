@@ -67,10 +67,10 @@ pub struct Spec {
     pub exp: i32,
 }
 impl Spec {
-    /// `self` parsed, checked to have exactly its sign, coefficient, and
+    /// `self` constructed, checked to have exactly its sign, coefficient, and
     /// exponent, so that each benchmark measures the representations its name
     /// says.
-    pub fn parse<T: Number>(self) -> T {
+    pub fn construct<T: Number>(self) -> T {
         let value = T::from_fields(self.neg, self.coeff, self.exp);
         assert_eq!(decoded(value), self.fields(), "{self:?}");
         value
@@ -172,7 +172,7 @@ impl<T: Number> Workload<T> {
             key_bases
                 .iter()
                 .zip(&forms)
-                .map(|(base, k)| base.form((k + shift) % 3).parse())
+                .map(|(base, k)| base.form((k + shift) % 3).construct())
                 .collect()
         };
         let keys = member(0);
@@ -193,7 +193,7 @@ impl<T: Number> Workload<T> {
         rng.shuffle(&mut cohort);
         let mut missing: Vec<T> = miss_bases
             .iter()
-            .map(|base| base.form(rng.below(3) as u32).parse())
+            .map(|base| base.form(rng.below(3) as u32).construct())
             .collect();
         rng.shuffle(&mut missing);
         Self {

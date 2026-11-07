@@ -76,7 +76,7 @@ fn division<T: Divide>(c: &mut Criterion, rng: &mut SplitMix64) {
         .collect();
     let pairs: Vec<(T, T)> = specs
         .iter()
-        .map(|&(q, b)| (product(q, b).parse(), b.parse()))
+        .map(|&(q, b)| (product(q, b).construct(), b.construct()))
         .collect();
     for (&(q, _), &(a, b)) in specs.iter().zip(&pairs) {
         assert_eq!(a.quotient(b).map(decoded), Ok(q.fields()), "{a:?} / {b:?}");
@@ -87,7 +87,10 @@ fn division<T: Divide>(c: &mut Criterion, rng: &mut SplitMix64) {
     let specs: Vec<(Spec, Spec)> = (0..COUNT)
         .map(|_| (rng.spec(T::DIGITS), rng.spec(T::DIGITS)))
         .collect();
-    let random: Vec<(T, T)> = specs.iter().map(|&(a, b)| (a.parse(), b.parse())).collect();
+    let random: Vec<(T, T)> = specs
+        .iter()
+        .map(|&(a, b)| (a.construct(), b.construct()))
+        .collect();
     for (&(x, y), &(a, b)) in specs.iter().zip(&random) {
         let (floor, exact) = quotient_fields(x, y, T::DIGITS);
         let expected = if exact {
@@ -117,14 +120,14 @@ macro_rules! conversions {
     ($c:expr, $rng:expr, $($small:ident $large:ident $rounded:ident),*) => {$(
         let name = format!("{}_{}", <$small as Number>::NAME, <$large as Number>::NAME);
         let specs: Vec<Spec> = (0..COUNT).map(|_| $rng.spec(<$small as Number>::DIGITS)).collect();
-        let small: Vec<$small> = specs.iter().map(|&x| x.parse()).collect();
+        let small: Vec<$small> = specs.iter().map(|&x| x.construct()).collect();
         let fitting: Vec<$large> = small.iter().map(|&v| $large::from(v)).collect();
         for (&x, &v) in specs.iter().zip(&fitting) {
             assert_eq!(decoded(v), x.fields(), "{name}: widen {x:?}");
             assert_eq!($small::try_from(v).map(decoded), Ok(x.fields()), "{name}: narrow {x:?}");
         }
         let specs: Vec<Spec> = (0..COUNT).map(|_| $rng.spec(<$large as Number>::DIGITS)).collect();
-        let wide: Vec<$large> = specs.iter().map(|&x| x.parse()).collect();
+        let wide: Vec<$large> = specs.iter().map(|&x| x.construct()).collect();
         for (&x, &v) in specs.iter().zip(&wide) {
             let floor = floor_fields(signed(x), x.exp, <$small as Number>::DIGITS, false);
             assert_eq!(

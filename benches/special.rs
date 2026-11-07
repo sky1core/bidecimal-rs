@@ -127,7 +127,12 @@ where
     OrderedDecimal<T>: Ord + Hash,
 {
     let finite: Vec<(T, T)> = (0..COUNT)
-        .map(|_| (rng.spec(T::DIGITS).parse(), rng.spec(T::DIGITS).parse()))
+        .map(|_| {
+            (
+                rng.spec(T::DIGITS).construct(),
+                rng.spec(T::DIGITS).construct(),
+            )
+        })
         .collect();
     let draws: Vec<u64> = (0..2 * COUNT).map(|_| rng.next()).collect();
     let specials = T::specials();
