@@ -142,12 +142,12 @@ macro_rules! decimal {
     )+ };
 }
 decimal!(
-    Decimal32 => W32, encode_32, crate::parse::parse_32_with_grammar::<false>;
-    Decimal64 => W64, encode_64, crate::parse::parse_64_with_grammar::<false>;
-    Decimal128 => W128, encode_128, crate::parse::parse_with_grammar::<crate::layout::W128, false>
+    Decimal32 => W32, encode_32, crate::parse::parse_32;
+    Decimal64 => W64, encode_64, crate::parse::parse_64;
+    Decimal128 => W128, encode_128, crate::parse::parse::<crate::layout::W128>
 );
 
-/// Accept only database decimal ASCII, not the wider public parse grammar.
+/// Accept decimal ASCII using the shared finite parsing grammar.
 /// Syntax is checked to the end before exact conversion, including huge inputs.
 #[cfg(any(
     test,
@@ -164,8 +164,7 @@ pub(crate) fn decode_text<D: DbDecimal>(bytes: &[u8], allow_pg_special: bool) ->
             _ => {}
         }
     }
-    // The DB-only grammar rejects exponent syntax within the existing parser
-    // fallback. Checked UTF-8 and syntax-before-fit error precedence remain.
+    // The shared grammar rejects exponent syntax. Checked UTF-8 and syntax-before-fit error precedence remain.
     decode_decimal_str(core::str::from_utf8(bytes).map_err(|_| Error::InvalidInput)?)
 }
 

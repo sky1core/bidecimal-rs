@@ -233,13 +233,12 @@ mod hint_candidate_tests {
                                 continue;
                             }
                             for negative in [false, true] {
-                                let text = std::format!(
-                                    "{}{}e{}",
-                                    if negative { "-" } else { "" },
-                                    coefficient,
-                                    exp
-                                );
-                                check(<$d>::parse(&text).unwrap());
+                                let value = <$d>::from_coefficient_and_exponent(
+                                    coefficient.try_into().unwrap(),
+                                    exp,
+                                )
+                                .unwrap();
+                                check(if negative { -value } else { value });
                             }
                         }
                     }
@@ -256,15 +255,10 @@ mod hint_candidate_tests {
                     let coefficient =
                         ((u128::from(high) << 64) | u128::from(state)) % (maximum + 1);
                     let exp = $emin + (state % u64::try_from($emax - $emin + 1).unwrap()) as i32;
-                    check(
-                        <$d>::parse(&std::format!(
-                            "{}{}e{}",
-                            if state & 1 == 0 { "-" } else { "" },
-                            coefficient,
-                            exp
-                        ))
-                        .unwrap(),
-                    );
+                    let value =
+                        <$d>::from_coefficient_and_exponent(coefficient.try_into().unwrap(), exp)
+                            .unwrap();
+                    check(if state & 1 == 0 { -value } else { value });
                 }
             }
         };

@@ -23,6 +23,8 @@ mod reference;
 use reference::{floor_div, floor_fields, pow10, signed};
 
 trait Operate: Number + fmt::Display {
+    fn parse(text: &str) -> Self;
+    fn parse_result(text: &str, direction: Option<Rounding>) -> Result<Self, Error>;
     fn sum(self, other: Self) -> Result<Self, Error>;
     fn difference(self, other: Self) -> Result<Self, Error>;
     fn sum_floor(self, other: Self) -> Result<Self, Error>;
@@ -42,6 +44,12 @@ trait Operate: Number + fmt::Display {
 macro_rules! operate {
     ($($t:ident),*) => {$(
         impl Operate for $t {
+            fn parse(text: &str) -> Self {
+                $t::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))
+            }
+            fn parse_result(text: &str, direction: Option<Rounding>) -> Result<Self, Error> {
+                match direction { None => $t::parse(text), Some(dir) => $t::parse_rounded(text, dir) }
+            }
             fn sum(self, other: Self) -> Result<Self, Error> { $t::add(self, other) }
             fn difference(self, other: Self) -> Result<Self, Error> { $t::sub(self, other) }
             fn sum_floor(self, other: Self) -> Result<Self, Error> {
@@ -128,6 +136,29 @@ fn parsing<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
         );
     }
     per_element(c, &format!("parse_{}", T::NAME), &inputs, |s| T::parse(s));
+    let rounding = format!("1.{}1", "2".repeat(T::DIGITS as usize));
+    let long = format!("{}1.50", "0".repeat(80));
+    for (name, text, direction) in [
+        ("inexact", rounding.as_str(), None),
+        ("rounded", rounding.as_str(), Some(Rounding::TowardPositive)),
+        ("long_exact", long.as_str(), None),
+        ("invalid_short", "12x4", None),
+        (
+            "invalid_long",
+            "123456789012345678901234567890123456789x",
+            None,
+        ),
+    ] {
+        let result = T::parse_result(text, direction);
+        match name {
+            "inexact" => assert!(matches!(result, Err(Error::Inexact))),
+            "invalid_short" | "invalid_long" => assert!(matches!(result, Err(Error::InvalidInput))),
+            _ => assert!(result.is_ok()),
+        }
+        c.bench_function(&format!("parse_{}_{name}", T::NAME), |b| {
+            b.iter(|| black_box(T::parse_result(black_box(text), direction)))
+        });
+    }
 }
 
 struct StackBuffer {

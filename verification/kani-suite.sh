@@ -65,23 +65,12 @@ harnesses=(
     parse::proofs::parse_32_fast_path_len8
     parse::proofs::parse_32_fast_path_len9
     parse::proofs::parse_64_fast_path_len8
-    parse::proofs::parse_32_decimal_fast_path_len0
-    parse::proofs::parse_32_decimal_fast_path_len1
-    parse::proofs::parse_32_decimal_fast_path_len2
-    parse::proofs::parse_32_decimal_fast_path_len3
-    parse::proofs::parse_32_decimal_fast_path_len4
-    parse::proofs::parse_32_decimal_fast_path_len5
-    parse::proofs::parse_32_decimal_fast_path_len6
-    parse::proofs::parse_32_decimal_fast_path_len7
-    parse::proofs::parse_32_decimal_fast_path_len8
-    parse::proofs::parse_32_decimal_fast_path_len9
-    parse::proofs::parse_64_decimal_fast_path_len8
     parse::proofs::parse_eight_reads_eight_ascii_digits
     parse::proofs::point_lane_constant
     parse::proofs::zero_lanes_marks_exactly_the_zero_bytes
 )
 
-expected_count=75
+expected_count=64
 if [[ "${#harnesses[@]}" -ne "$expected_count" ]]; then
     echo "Kani suite definition error: expected $expected_count harnesses, found ${#harnesses[@]}" >&2
     exit 1

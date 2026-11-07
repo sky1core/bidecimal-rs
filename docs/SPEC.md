@@ -334,9 +334,9 @@ to recover the source's original spelling:
 | `0.1_f64` | Decimal64 and Decimal128: `0.1` |
 | `0.1_f64 + 0.2_f64` | Decimal64 and Decimal128: `0.3` |
 | `86.296_f64` | Decimal64 and Decimal128: `86.296` |
-| `1e20_f64` | Decimal64 and Decimal128: `1E+20` |
-| `1.2345678901234568e17_f64` | Decimal64 and Decimal128: `1.23456789012346E+17` |
-| `5e-324_f64` (the smallest positive f64 subnormal) | Decimal64 and Decimal128: `4.94065645841247E-324`; Decimal32: positive zero |
+| `1e20_f64` | Decimal64 and Decimal128: 10^20 |
+| `1.2345678901234568e17_f64` | Decimal64 and Decimal128: 1.23456789012346 × 10^17 |
+| `5e-324_f64` (the smallest positive f64 subnormal) | Decimal64 and Decimal128: 4.94065645841247 × 10^−324; Decimal32: positive zero |
 | `0.1_f32` | All three decimal widths: `0.1` |
 
 The same digit rule applies to binary subnormals. Their available relative
@@ -371,15 +371,14 @@ are the explicitly named interoperability path, not implicit conversion.
   `i32::MIN`; it does not negate the exponent in `i32` arithmetic.
   Decimal32 uses i32 coefficients, Decimal64 uses i64, and Decimal128 uses
   i128; exponent and scale use i32.
-- `from_coefficient_and_exponent` and its `_rounded` counterpart give the
-  same bits or error as parsing `{coefficient}E{exponent}`, without or with
-  the corresponding direction. The preferred exponent is exponent.
-- `from_mantissa_and_scale` and `from_mantissa_and_scale_rounded` give the same bits or error as
-  parsing the integer followed by `E` and the negated scale, without or with
-  a direction respectively. The preferred exponent is −scale; precision and
-  exponent limits follow narrowing, with at most one directed rounding.
-  Integer and scale extrema follow the same rules without overflow in
-  interpreting the inputs.
+- `from_coefficient_and_exponent` and `from_mantissa_and_scale` construct the
+  value coefficient × 10^exponent or mantissa × 10^(−scale); the preferred
+  exponent is exponent or −scale. The correctness contract applies to that
+  value: without a direction an unrepresentable value is classified as in
+  narrowing, and the `_rounded` counterparts round it once in the given
+  direction, including directed overflow. Precision and exponent limits
+  follow narrowing. Integer, exponent, and scale extrema follow the same
+  rules without overflow in interpreting the inputs.
 - `to_mantissa_and_scale` returns the stored signed coefficient and negated exponent
   of a finite value without removing trailing zeros: `1.00` gives `(100, 2)`.
   It never fails for a finite value; infinity and NaN are invalid input.
@@ -418,7 +417,7 @@ same sign and payload. Both methods are bitwise idempotent. Applying
 For example, both methods turn `1.5000` into coefficient 15 and exponent -1.
 For `1500` at exponent zero, `trim_fraction_zeros` keeps coefficient 1500 and
 exponent zero, while `strip_trailing_zeros` returns coefficient 15 and exponent
-2; both results still display as `1500`. For `0E+5`, the first method keeps
+2; both results still display as `1500`. For a zero with exponent 5, the first method keeps
 exponent 5 and the second returns exponent zero, retaining either zero sign.
 A negative signaling NaN with payload 7 becomes a negative quiet NaN with
 payload 7 under either method.
@@ -438,18 +437,18 @@ exponent or NaN sign, payload, or signaling state.
 ### Parsing
 
 - Converts a string to each type.
-- Accepted syntax: an optional sign; a significand of decimal digits with at
-  least one digit and an optional decimal point before, between, or after
-  them; an optional exponent of `e` or `E`, an optional sign, and at least one
-  digit. Infinity and NaN are spelled `inf`, `infinity`, and `nan` in any
-  letter case, with an optional sign; there is no syntax for a signaling NaN
-  or a payload. Anything else, including whitespace and digit separators, is
-  invalid input.
-- The written exponent is the preferred exponent: `1.50` has coefficient 150
-  and exponent −2. The correctness contract applies to the parsed value, and
-  an unrepresentable value is classified as in narrowing.
-- Any number of digits and any exponent magnitude are accepted; the result is
-  correct for every syntactically valid string.
+- Accepted syntax: an optional sign and decimal digits, with at least one
+  digit and an optional decimal point before, between, or after them.
+  Infinity and NaN are spelled `inf`, `infinity`, and `nan` in any letter
+  case, with an optional sign; there is no syntax for a signaling NaN or a
+  payload. Anything else, including exponent notation (`e` or `E`),
+  whitespace, and digit separators, is invalid input.
+- The preferred exponent is the negated number of digits after the decimal
+  point: `1.50` has coefficient 150 and exponent −2. The correctness contract
+  applies to the parsed value, and an unrepresentable value is classified as
+  in narrowing.
+- Any number of digits is accepted; the result is correct for every
+  syntactically valid string.
 
 ### Formatting
 
@@ -489,8 +488,9 @@ exponent or NaN sign, payload, or signaling state.
   Parsing failures, including those of integer inputs, report serde errors
   that include the corresponding decimal error.
 - String round trips preserve the numeric value, finite fractional cohorts,
-  and zero signs. Positive exponents are not retained (`1E+5` is written as
-  `"100000"`), and NaN sign, payload, and signaling state are lost, as in
+  and zero signs. Positive exponents are not retained (coefficient 1 with
+  exponent 5 is written as `"100000"`), and NaN sign, payload, and signaling
+  state are lost, as in
   `Display` and parsing.
 - `OrderedDecimal<T>` delegates to its wrapped value without adding a wrapper
   to the representation or normalizing equal keys.

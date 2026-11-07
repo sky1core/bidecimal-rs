@@ -97,7 +97,7 @@ Rounded overflow gives signed infinity; underflow gives a subnormal or signed
 zero. Binary-to-decimal zeros have exponent zero. NaNs retain their sign,
 become quiet, and retain their integer payload only if it fits. Binary
 subnormals use the same digit rule and can retain expansion noise:
-`Decimal64::from_f64(5e-324)` has value `4.94065645841247E-324`.
+`Decimal64::from_f64(5e-324)` has value 4.94065645841247 × 10^−324.
 See the [binary conversion contract](docs/SPEC.md#binary-floating-point-conversion)
 for range, payload, cohort and round-trip limits. Exact parsing, decimal
 arithmetic and width conversion are unchanged; serde still rejects floats.
@@ -147,7 +147,7 @@ the obligations without a direct machine proof are listed separately there.
 | Binary floating-point conversion | Manual bounds, independent-reference checks and stated exhaustive domains checked | [VERIFICATION.md](docs/VERIFICATION.md#binary-floating-point-conversion): certified integer and Clinger paths, direct limb rounding, exact-text parser contract, independent-reference and exhaustive results |
 | Binary conversion NaN mapping | Signed-special and payload-fit checks passed | [VERIFICATION.md](docs/VERIFICATION.md#binary-floating-point-conversion): signed quiet NaNs, payload fit and bit-transport limits |
 | Width conversion | Met | [VERIFICATION.md](docs/VERIFICATION.md): Fitting a coefficient; widening and narrowing rows of Exhaustive and differential evidence |
-| Parsing | Met | [VERIFICATION.md](docs/VERIFICATION.md): String parsing |
+| Parsing | Met | [VERIFICATION.md](docs/VERIFICATION.md#string-parsing): single grammar, independent references and parser proof boundaries |
 | Formatting | Met | [VERIFICATION.md](docs/VERIFICATION.md): Plain notation formatting, Decimal32 exhaustive format/parse round trip |
 | Verification 1: integer routine proofs | Manual full-domain arguments with checked numerical premises; no direct conversion machine proof | [VERIFICATION.md](docs/VERIFICATION.md#checked-integer-argument-premises): finite enumeration of expansion, limb/carry, rounding-index, format and text-capacity bounds; Integer obligations for existing helpers |
 | Verification 2: exhaustive Decimal32 enumeration | Recorded full-domain checks passed | [VERIFICATION.md](docs/VERIFICATION.md#binary-floating-point-conversion): all raw Decimal32 patterns, independent rejection checks and both binary destinations; existing decoding, widening, format/parse and quantize records below |

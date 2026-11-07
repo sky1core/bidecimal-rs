@@ -1,4 +1,5 @@
 use std::format;
+use std::string::ToString;
 use std::vec::Vec;
 
 use crate::refbid::{self, Classified, Format};
@@ -35,26 +36,15 @@ fn check_creation(int: i128, scale: i32, format: Format, powers: &Powers) {
     let text = format!("{int}E{}", -i64::from(scale));
     for mode in MODES {
         let actual = construct(int, scale, format, mode);
-        let parsed = match format {
-            Format::D32 => match mode {
-                None => Decimal32::parse(&text),
-                Some(dir) => Decimal32::parse_rounded(&text, dir),
-            }
-            .map(|x| x.to_bits() as u128),
-            Format::D64 => match mode {
-                None => Decimal64::parse(&text),
-                Some(dir) => Decimal64::parse_rounded(&text, dir),
-            }
-            .map(|x| x.to_bits() as u128),
-            Format::D128 => match mode {
-                None => Decimal128::parse(&text),
-                Some(dir) => Decimal128::parse_rounded(&text, dir),
-            }
-            .map(Decimal128::to_bits),
-        };
-        assert_eq!(actual, parsed, "P={}, {text}, {mode:?}", bounds(format).0);
         let expected = directed(
-            crate::parse_tests::reference(&text, format, mode, powers),
+            crate::parse_tests::numeric_reference(
+                int < 0,
+                &int.unsigned_abs().to_string(),
+                -i128::from(scale),
+                format,
+                mode,
+                powers,
+            ),
             int < 0,
             mode,
             format,
@@ -291,7 +281,7 @@ fn int_scale_decomposition_fixed_seed_bits() {
 fn int_scale_documented_contract() {
     macro_rules! at_width {
         ($decimal:ty) => {
-            for (text, parts) in [("1.00", (100, 2)), ("1E+5", (1, -5)), ("-1.00", (-100, 2))] {
+            for (text, parts) in [("1.00", (100, 2)), ("-1.00", (-100, 2))] {
                 let x = <$decimal>::parse(text).unwrap();
                 assert_eq!(x.to_mantissa_and_scale(), Ok(parts));
                 assert_eq!(
@@ -301,6 +291,8 @@ fn int_scale_documented_contract() {
                     x.to_bits()
                 );
             }
+            let positive = <$decimal>::from_coefficient_and_exponent(1, 5).unwrap();
+            assert_eq!(positive.to_mantissa_and_scale(), Ok((1, -5)));
             let x = <$decimal>::parse("-0.00").unwrap();
             assert!(x.is_sign_negative());
             assert_eq!(x.to_mantissa_and_scale(), Ok((0, 2)));
@@ -325,9 +317,10 @@ fn int_scale_decimal32_exhaustive_reference() {
 }
 
 #[test]
-fn coefficient_exponent_construction_matches_parser_and_scale() {
+fn coefficient_exponent_construction_matches_numeric_reference_and_scale() {
+    let powers = Powers::new(12327);
     macro_rules! at_width {
-        ($decimal:ty, $int:ty) => {
+        ($decimal:ty, $int:ty, $format:expr) => {
             for coefficient in [
                 <$int>::MIN,
                 <$int>::MIN + 1,
@@ -350,11 +343,22 @@ fn coefficient_exponent_construction_matches_parser_and_scale() {
                     <$decimal>::MAX_EXP,
                     <$decimal>::MAX_EXP + 1,
                 ] {
-                    let text = format!("{coefficient}E{exponent}");
                     let exact = <$decimal>::from_coefficient_and_exponent(coefficient, exponent);
                     assert_eq!(
-                        exact.map(|x| x.to_bits()),
-                        <$decimal>::parse(&text).map(|x| x.to_bits())
+                        exact.map(|x| classified(x.to_bits() as u128, $format)),
+                        directed(
+                            crate::parse_tests::numeric_reference(
+                                coefficient < 0,
+                                &coefficient.unsigned_abs().to_string(),
+                                i128::from(exponent),
+                                $format,
+                                None,
+                                &powers
+                            ),
+                            coefficient < 0,
+                            None,
+                            $format
+                        )
                     );
                     if let Some(scale) = exponent.checked_neg() {
                         assert_eq!(
@@ -370,8 +374,20 @@ fn coefficient_exponent_construction_matches_parser_and_scale() {
                             dir,
                         );
                         assert_eq!(
-                            rounded.map(|x| x.to_bits()),
-                            <$decimal>::parse_rounded(&text, dir).map(|x| x.to_bits())
+                            rounded.map(|x| classified(x.to_bits() as u128, $format)),
+                            directed(
+                                crate::parse_tests::numeric_reference(
+                                    coefficient < 0,
+                                    &coefficient.unsigned_abs().to_string(),
+                                    i128::from(exponent),
+                                    $format,
+                                    Some(dir),
+                                    &powers
+                                ),
+                                coefficient < 0,
+                                Some(dir),
+                                $format
+                            )
                         );
                         if let Some(scale) = exponent.checked_neg() {
                             assert_eq!(
@@ -389,7 +405,7 @@ fn coefficient_exponent_construction_matches_parser_and_scale() {
             }
         };
     }
-    at_width!(Decimal32, i32);
-    at_width!(Decimal64, i64);
-    at_width!(Decimal128, i128);
+    at_width!(Decimal32, i32, Format::D32);
+    at_width!(Decimal64, i64, Format::D64);
+    at_width!(Decimal128, i128, Format::D128);
 }

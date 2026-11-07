@@ -1187,6 +1187,43 @@ pub(crate) const BINARY_POW5_CACHE: [u128; 651] = [
     0x8e679c2f5e44ff8f570f09eaa7ea7648,
 ];
 
+// Same normalized floor as BINARY_POW5_CACHE, for s=309..=338.
+// Binary-to-decimal conversion needs this extension for the smallest f64
+// inputs at 15 decimal digits. Keep the original cache's indexing unchanged.
+// Exact rational reconstruction of all entries is checked in interval_tests.
+pub(crate) const BINARY_POW5_CACHE_EXT: [u128; 30] = [
+    0xb201833b35d63f732cd2cc6551e513da,
+    0xde81e40a034bcf4ff8077f7ea65e58d1,
+    0x8b112e86420f6191fb04afaf27faf782,
+    0xadd57a27d29339f679c5db9af1f9b563,
+    0xd94ad8b1c738087418375281ae7822bc,
+    0x87cec76f1c8305488f2293910d0b15b5,
+    0xa9c2794ae3a3c69ab2eb3875504ddb22,
+    0xd433179d9c8cb8415fa60692a46151eb,
+    0x849feec281d7f328dbc7c41ba6bcd333,
+    0xa5c7ea73224deff312b9b522906c0800,
+    0xcf39e50feae16befd768226b34870a00,
+    0x81842f29f2cce375e6a1158300d46640,
+    0xa1e53af46f801c5360495ae3c1097fd0,
+    0xca5e89b18b602368385bb19cb14bdfc4,
+    0xfcf62c1dee382c4246729e03dd9ed7b5,
+    0x9e19db92b4e31ba96c07a2c26a8346d1,
+    0xc5a05277621be293c7098b7305241885,
+    0xf70867153aa2db38b8cbee4fc66d1ea7,
+    0x9a65406d44a5c903737f74f1dc043328,
+    0xc0fe908895cf3b44505f522e53053ff2,
+    0xf13e34aabb430a15647726b9e7c68fef,
+    0x96c6e0eab509e64d5eca783430dc19f5,
+    0xbc789925624c5fe0b67d16413d132072,
+    0xeb96bf6ebadf77d8e41c5bd18c57e88f,
+    0x933e37a534cbaae78e91b962f7b6f159,
+    0xb80dc58e81fe95a1723627bbb5a4adb0,
+    0xe61136f2227e3b09cec3b1aaa30dd91c,
+    0x8fcac257558ee4e6213a4f0aa5e8a7b1,
+    0xb3bd72ed2af29e1fa988e2cd4f62d19d,
+    0xe0accfa875af45a793eb1b80a33b8605,
+];
+
 pub(crate) const BINARY_SUBNORMAL_POW5: [([u32; 86], usize); 3] = build_binary_subnormal_pow5();
 
 #[expect(

@@ -146,8 +146,8 @@ mod tests {
                     <$d>::NAN,
                     <$d>::INFINITY,
                     <$d>::NEG_INFINITY,
-                    <$d>::parse("1e-31").unwrap(),
-                    <$d>::parse("1e65").unwrap(),
+                    <$d>::from_coefficient_and_exponent(1, -31).unwrap(),
+                    <$d>::from_coefficient_and_exponent(1, 65).unwrap(),
                 ] {
                     assert!(Value::try_from(value).is_err());
                 }
