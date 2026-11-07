@@ -93,11 +93,11 @@ parser baseline. The normal runner also includes them and preserves their
 
 | Fixtures | Exact decimal text |
 |---|---|
-| All widths | short01 = 0.1, short15 = 1.5, short12345 = 123.45, integer = 42, tiny = 1e-28, huge = 1e28, extended32 = 1e11, large_exp = 1e80, subnormal32 = 1e-45 |
-| Decimal64 and Decimal128 | digits15 = 1.23456789012345, digits16 = 1.234567890123456, subnormal64 = 5e-324, subnormal64_max = 2.225073858507201e-308 |
+| All widths | short01 = 0.1, short15 = 1.5, short12345 = 123.45, integer = 42; tiny = `0.` + 27 zeros + `1`; huge = `1` + 28 zeros; extended32 = `1` + 11 zeros; large_exp = `1` + 80 zeros; subnormal32 = `0.` + 44 zeros + `1` |
+| Decimal64 and Decimal128 | digits15 = 1.23456789012345, digits16 = 1.234567890123456; subnormal64 = `0.` + 323 zeros + `5`; subnormal64_max = `0.` + 307 zeros + `2225073858507201` |
 | Decimal128 only | digits17 = 1.2345678901234567, digits18 = 1.23456789012345678, digits19 = 1.234567890123456789, digits34 = 1.234567890123456789012345678901234; f32_double_round = 1.000000059604644775390625001; f32_midpoint = 1.000000059604644775390625000000001 |
-| range_tiny, by width | 1e-101, 1e-398, 1e-6176 |
-| range_huge, by width | 9.999999e96, 9.999999999999999e384, 9.999999999999999999999999999999999e6144 |
+| range_tiny, by width | plain strings: `0.` followed by 100/397/6175 zeros and `1` |
+| range_huge, by width | plain strings: 7/16/34 nines followed by 90/369/6111 zeros |
 | Additional binary inputs | subnormal = from_bits(1), power2 = 2^80, separately for f64 and f32 |
 
 A single repeated input lets the branch predictor learn its path. The mixed
@@ -121,9 +121,14 @@ path name without the `wide_` prefix. If rust_decimal's `from_f64` returned
 `wide_float_mixed_from_f64_W_unit` without `ACCURACY`; with the fixed seed all
 three unit paths are paired.
 
-All decimal fixtures parse exactly in the designated width. Binary inputs are
-parsed directly as f64/f32 from those same decimal strings, plus the two binary
-fixtures. The range extremes can become signed zero or infinity in the binary
+All fixed decimal fixture texts are plain strings and parse exactly in the
+designated width. The `huge`, `extended32` and `large_exp` bidecimal inputs
+use `from_coefficient_and_exponent(1, 28/11/80)` to preserve their original
+positive-exponent cohorts. Mixed decimal inputs use that constructor for the
+generated signed coefficient and exponent, with a stored-cohort assertion.
+Their scientific text is used only by the independent numerical oracle, not
+by bidecimal's text parser. Binary inputs are parsed directly as f64/f32 from
+the fixed decimal strings, plus the two binary fixtures. The range extremes can become signed zero or infinity in the binary
 source; `FLOAT_INPUT` records the actual bits and value, so these are special
 value paths rather than finite conversions. Input parsing, text construction,
 BID decoding, BigInt calculations and all accuracy checks are outside timers.

@@ -67,12 +67,11 @@ pub struct Spec {
     pub exp: i32,
 }
 impl Spec {
-    /// `self` parsed, checked to have exactly its sign, coefficient, and
+    /// `self` constructed, checked to have exactly its sign, coefficient, and
     /// exponent, so that each benchmark measures the representations its name
     /// says.
-    pub fn parse<T: Number>(self) -> T {
-        let sign = if self.neg { "-" } else { "" };
-        let value = T::parse(&format!("{sign}{}e{}", self.coeff, self.exp));
+    pub fn construct<T: Number>(self) -> T {
+        let value = T::from_fields(self.neg, self.coeff, self.exp);
         assert_eq!(decoded(value), self.fields(), "{self:?}");
         value
     }
@@ -113,7 +112,7 @@ pub trait Number: Copy + PartialEq + PartialOrd + fmt::Debug {
     const NAME: &'static str;
     const DIGITS: u32;
     const WIDTH: u32;
-    fn parse(text: &str) -> Self;
+    fn from_fields(negative: bool, coefficient: u128, exponent: i32) -> Self;
     fn bits(self) -> u128;
 }
 macro_rules! number {
@@ -122,8 +121,9 @@ macro_rules! number {
             const NAME: &'static str = $name;
             const DIGITS: u32 = $digits;
             const WIDTH: u32 = $width;
-            fn parse(text: &str) -> Self {
-                $t::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))
+            fn from_fields(negative: bool, coefficient: u128, exponent: i32) -> Self {
+                let value = $t::from_coefficient_and_exponent(coefficient.try_into().unwrap(), exponent).unwrap();
+                if negative { -value } else { value }
             }
             fn bits(self) -> u128 {
                 self.to_bits() as u128
@@ -172,7 +172,7 @@ impl<T: Number> Workload<T> {
             key_bases
                 .iter()
                 .zip(&forms)
-                .map(|(base, k)| base.form((k + shift) % 3).parse())
+                .map(|(base, k)| base.form((k + shift) % 3).construct())
                 .collect()
         };
         let keys = member(0);
@@ -193,7 +193,7 @@ impl<T: Number> Workload<T> {
         rng.shuffle(&mut cohort);
         let mut missing: Vec<T> = miss_bases
             .iter()
-            .map(|base| base.form(rng.below(3) as u32).parse())
+            .map(|base| base.form(rng.below(3) as u32).construct())
             .collect();
         rng.shuffle(&mut missing);
         Self {

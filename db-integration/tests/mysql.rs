@@ -652,7 +652,7 @@ async fn suite(mut driver: Driver) -> Result<()> {
     driver
         .execute("CREATE TEMPORARY TABLE bid_wide(v DECIMAL(65,0))")
         .await?;
-    let high: Decimal128 = "1e64".parse()?;
+    let high = Decimal128::from_coefficient_and_exponent(1, 64)?;
     driver
         .insert128("INSERT INTO bid_wide VALUES (?)", Some(high))
         .await?;

@@ -23,6 +23,8 @@ mod reference;
 use reference::{floor_div, floor_fields, pow10, signed};
 
 trait Operate: Number + fmt::Display {
+    fn parse(text: &str) -> Self;
+    fn parse_result(text: &str, direction: Option<Rounding>) -> Result<Self, Error>;
     fn sum(self, other: Self) -> Result<Self, Error>;
     fn difference(self, other: Self) -> Result<Self, Error>;
     fn sum_floor(self, other: Self) -> Result<Self, Error>;
@@ -42,6 +44,12 @@ trait Operate: Number + fmt::Display {
 macro_rules! operate {
     ($($t:ident),*) => {$(
         impl Operate for $t {
+            fn parse(text: &str) -> Self {
+                $t::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))
+            }
+            fn parse_result(text: &str, direction: Option<Rounding>) -> Result<Self, Error> {
+                match direction { None => $t::parse(text), Some(dir) => $t::parse_rounded(text, dir) }
+            }
             fn sum(self, other: Self) -> Result<Self, Error> { $t::add(self, other) }
             fn difference(self, other: Self) -> Result<Self, Error> { $t::sub(self, other) }
             fn sum_floor(self, other: Self) -> Result<Self, Error> {
@@ -128,6 +136,29 @@ fn parsing<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
         );
     }
     per_element(c, &format!("parse_{}", T::NAME), &inputs, |s| T::parse(s));
+    let rounding = format!("1.{}1", "2".repeat(T::DIGITS as usize));
+    let long = format!("{}1.50", "0".repeat(80));
+    for (name, text, direction) in [
+        ("inexact", rounding.as_str(), None),
+        ("rounded", rounding.as_str(), Some(Rounding::TowardPositive)),
+        ("long_exact", long.as_str(), None),
+        ("invalid_short", "12x4", None),
+        (
+            "invalid_long",
+            "123456789012345678901234567890123456789x",
+            None,
+        ),
+    ] {
+        let result = T::parse_result(text, direction);
+        match name {
+            "inexact" => assert!(matches!(result, Err(Error::Inexact))),
+            "invalid_short" | "invalid_long" => assert!(matches!(result, Err(Error::InvalidInput))),
+            _ => assert!(result.is_ok()),
+        }
+        c.bench_function(&format!("parse_{}_{name}", T::NAME), |b| {
+            b.iter(|| black_box(T::parse_result(black_box(text), direction)))
+        });
+    }
 }
 
 struct StackBuffer {
@@ -156,7 +187,7 @@ fn format_stack(value: impl fmt::Display) -> (StackBuffer, fmt::Result) {
 
 fn formatting<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     let specs: Vec<Spec> = (0..COUNT).map(|_| rng.spec(T::DIGITS)).collect();
-    let inputs: Vec<T> = specs.iter().map(|&x| x.parse()).collect();
+    let inputs: Vec<T> = specs.iter().map(|&x| x.construct()).collect();
     for (&spec, &value) in specs.iter().zip(&inputs) {
         let (buffer, result) = format_stack(value);
         assert_eq!(result, Ok(()), "format_{}: {spec:?}", T::NAME);
@@ -196,7 +227,10 @@ fn addition<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     let specs: Vec<(Spec, Spec)> = (0..COUNT)
         .map(|_| addition_specs(rng, T::DIGITS - 4, T::DIGITS - 4))
         .collect();
-    let inputs: Vec<(T, T)> = specs.iter().map(|&(a, b)| (a.parse(), b.parse())).collect();
+    let inputs: Vec<(T, T)> = specs
+        .iter()
+        .map(|&(a, b)| (a.construct(), b.construct()))
+        .collect();
     for (&(x, y), &(a, b)) in specs.iter().zip(&inputs) {
         for (subtract, result) in [(false, a.sum(b)), (true, a.difference(b))] {
             let (coeff, exp) = aligned_sum(x, y, subtract);
@@ -219,7 +253,10 @@ fn addition<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     let specs: Vec<(Spec, Spec)> = (0..COUNT)
         .map(|_| (rng.spec(T::DIGITS), rng.spec(T::DIGITS)))
         .collect();
-    let inputs: Vec<(T, T)> = specs.iter().map(|&(a, b)| (a.parse(), b.parse())).collect();
+    let inputs: Vec<(T, T)> = specs
+        .iter()
+        .map(|&(a, b)| (a.construct(), b.construct()))
+        .collect();
     for (&(x, y), &(a, b)) in specs.iter().zip(&inputs) {
         for (subtract, result) in [(false, a.sum_floor(b)), (true, a.difference_floor(b))] {
             let (coeff, exp) = aligned_sum(x, y, subtract);
@@ -272,8 +309,10 @@ fn addition_128(c: &mut Criterion, rng: &mut SplitMix64) {
         ("add_d128_exact_same_exp", same_exp),
         ("add_d128_exact_gap_wide", gap_wide),
     ] {
-        let inputs: Vec<(Decimal128, Decimal128)> =
-            specs.iter().map(|&(a, b)| (a.parse(), b.parse())).collect();
+        let inputs: Vec<(Decimal128, Decimal128)> = specs
+            .iter()
+            .map(|&(a, b)| (a.construct(), b.construct()))
+            .collect();
         for (&(x, y), &(a, b)) in specs.iter().zip(&inputs) {
             let (coeff, exp) = aligned_sum(x, y, false);
             assert!(coeff.magnitude().to_string().len() <= 34);
@@ -287,7 +326,7 @@ fn addition_128(c: &mut Criterion, rng: &mut SplitMix64) {
     }
 
     let specs: Vec<Spec> = (0..COUNT).map(|_| product_spec(rng)).collect();
-    let inputs: Vec<Decimal128> = specs.iter().map(|&x| x.parse()).collect();
+    let inputs: Vec<Decimal128> = specs.iter().map(|&x| x.construct()).collect();
     let mut accumulator = Decimal128::ZERO;
     let mut coeff = BigInt::ZERO;
     let mut exp = 0_i32;
@@ -326,7 +365,10 @@ fn multiplication<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     let specs: Vec<(Spec, Spec)> = (0..COUNT)
         .map(|_| (rng.spec(half), rng.spec(T::DIGITS - half)))
         .collect();
-    let inputs: Vec<(T, T)> = specs.iter().map(|&(a, b)| (a.parse(), b.parse())).collect();
+    let inputs: Vec<(T, T)> = specs
+        .iter()
+        .map(|&(a, b)| (a.construct(), b.construct()))
+        .collect();
     for (&(x, y), &(a, b)) in specs.iter().zip(&inputs) {
         let coeff = signed(x) * signed(y);
         assert!(coeff.magnitude().to_string().len() <= T::DIGITS as usize);
@@ -344,7 +386,10 @@ fn multiplication<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
     let specs: Vec<(Spec, Spec)> = (0..COUNT)
         .map(|_| (rng.spec(T::DIGITS), rng.spec(T::DIGITS)))
         .collect();
-    let inputs: Vec<(T, T)> = specs.iter().map(|&(a, b)| (a.parse(), b.parse())).collect();
+    let inputs: Vec<(T, T)> = specs
+        .iter()
+        .map(|&(a, b)| (a.construct(), b.construct()))
+        .collect();
     for (&(x, y), &(a, b)) in specs.iter().zip(&inputs) {
         let expected = floor_fields(
             signed(x) * signed(y),
@@ -373,8 +418,10 @@ fn mixed(c: &mut Criterion, rng: &mut SplitMix64) {
             )
         })
         .collect();
-    let inputs: Vec<(Decimal64, Decimal128)> =
-        specs.iter().map(|&(a, b)| (a.parse(), b.parse())).collect();
+    let inputs: Vec<(Decimal64, Decimal128)> = specs
+        .iter()
+        .map(|&(a, b)| (a.construct(), b.construct()))
+        .collect();
     let digits = <Decimal128 as Number>::DIGITS;
     for (&(x, y), &(a, b)) in specs.iter().zip(&inputs) {
         let (coeff, exp) = aligned_sum(x, y, false);
@@ -398,8 +445,10 @@ fn mixed(c: &mut Criterion, rng: &mut SplitMix64) {
             )
         })
         .collect();
-    let inputs: Vec<(Decimal32, Decimal128)> =
-        specs.iter().map(|&(a, b)| (a.parse(), b.parse())).collect();
+    let inputs: Vec<(Decimal32, Decimal128)> = specs
+        .iter()
+        .map(|&(a, b)| (a.construct(), b.construct()))
+        .collect();
     for (&(x, y), &(a, b)) in specs.iter().zip(&inputs) {
         let coeff = signed(x) * signed(y);
         assert!(coeff.magnitude().to_string().len() <= digits as usize);
@@ -422,7 +471,7 @@ fn quantize<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
             (x, x.exp + 1 + rng.below(u64::from(T::DIGITS - 1)) as i32)
         })
         .collect();
-    let inputs: Vec<(T, i32)> = specs.iter().map(|&(x, q)| (x.parse(), q)).collect();
+    let inputs: Vec<(T, i32)> = specs.iter().map(|&(x, q)| (x.construct(), q)).collect();
     for (&(x, q), &(a, _)) in specs.iter().zip(&inputs) {
         let coeff = floor_div(&signed(x), &pow10(q - x.exp));
         let expected = Bid {
@@ -456,7 +505,7 @@ fn multiple<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
         .collect();
     let inputs: Vec<(T, T)> = specs
         .iter()
-        .map(|&(x, step)| (x.parse(), step.parse()))
+        .map(|&(x, step)| (x.construct(), step.construct()))
         .collect();
     for (&(x, step), &(a, b)) in specs.iter().zip(&inputs) {
         let units = floor_div(
@@ -507,7 +556,10 @@ fn comparison<T: Operate>(c: &mut Criterion, rng: &mut SplitMix64) {
             }
         })
         .collect();
-    let inputs: Vec<(T, T)> = specs.iter().map(|&(a, b)| (a.parse(), b.parse())).collect();
+    let inputs: Vec<(T, T)> = specs
+        .iter()
+        .map(|&(a, b)| (a.construct(), b.construct()))
+        .collect();
     for (&(x, y), &(a, b)) in specs.iter().zip(&inputs) {
         assert_eq!(
             a.total_order(&b),
@@ -546,7 +598,7 @@ fn trailing_zero_methods<T: Operate>(c: &mut Criterion) {
             spec
         })
         .collect();
-    let inputs: Vec<T> = specs.iter().map(|&spec| spec.parse()).collect();
+    let inputs: Vec<T> = specs.iter().map(|&spec| spec.construct()).collect();
     for (&spec, &value) in specs.iter().zip(&inputs) {
         for (fractional, result) in [(true, value.trimmed()), (false, value.stripped_value())] {
             let mut expected = spec.fields();

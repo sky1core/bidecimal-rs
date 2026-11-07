@@ -747,10 +747,9 @@ macro_rules! decimal_type {
             /// Constructs the exact value `mantissa × 10^(-scale)`.
             ///
             /// Scale is the negation of the exponent passed to
-            /// [`quantize`](Self::quantize): `(1, -5)` represents `1E+5`.
-            /// The preferred exponent is `-scale`. The result has the same
-            /// bits as parsing the integer followed by `E` and the negated
-            /// scale, without allocating or formatting a string.
+            /// [`quantize`](Self::quantize): `(1, -5)` represents 100000.
+            /// The preferred exponent is `-scale`. Exact values retain that
+            /// cohort where representable, without allocating or formatting a string.
             ///
             /// # Errors
             ///
@@ -766,9 +765,7 @@ macro_rules! decimal_type {
             ///
             /// Scale is the negation of the exponent passed to
             /// [`quantize`](Self::quantize). The preferred exponent is
-            /// `-scale`; the result has the same bits as
-            /// [`parse_rounded`](Self::parse_rounded) of the integer followed
-            /// by `E` and the negated scale, including directed overflow.
+            /// `-scale`, including directed overflow.
             /// No string is allocated or formatted.
             #[expect(clippy::arithmetic_side_effects, reason = "negating an i32 widened to i64 cannot overflow")]
             pub fn from_mantissa_and_scale_rounded(
@@ -783,8 +780,8 @@ macro_rules! decimal_type {
             /// The coefficient is signed. This is the exponent-sign counterpart
             /// of [`from_mantissa_and_scale`](Self::from_mantissa_and_scale).
             /// All `i32` exponents are accepted as inputs without negation overflow.
-            /// Returns the same bits or error as parsing `{coefficient}E{exponent}`
-            /// with [`parse`](Self::parse); the preferred exponent is `exponent`.
+            /// The preferred exponent is `exponent`; exact values retain that
+            /// cohort where representable.
             ///
             /// # Errors
             ///
@@ -796,8 +793,7 @@ macro_rules! decimal_type {
 
             /// Constructs `coefficient × 10^exponent`, rounding once in direction
             /// `dir` if necessary, including directed overflow.
-            /// Equivalent to parsing the signed coefficient followed by `E`
-            /// and the exponent with [`parse_rounded`](Self::parse_rounded).
+            /// The preferred exponent is `exponent`.
             pub fn from_coefficient_and_exponent_rounded(
                 coefficient: $int,
                 exponent: i32,
@@ -932,13 +928,11 @@ macro_rules! decimal_type {
             ///
             /// The accepted syntax is an optional sign (`+` or `-`); a
             /// significand of ASCII decimal digits with at least one digit
-            /// and an optional decimal point before, between, or after them;
-            /// and an optional exponent of `e` or `E`, an optional sign, and
-            /// at least one digit. Any number of digits and any exponent
-            /// magnitude are accepted.
+            /// and an optional decimal point before, between, or after them.
+            /// Any number of digits is accepted. Exponent notation is invalid.
             ///
-            /// The result uses the preferred exponent, the written exponent
-            /// minus the number of digits after the decimal point, or the
+            /// The result uses the preferred exponent, the negative number
+            /// of digits after the decimal point, or the
             /// representable exponent closest to it: `1.50` has coefficient
             /// 150 and exponent −2. A zero keeps the written sign.
             ///
@@ -961,8 +955,8 @@ macro_rules! decimal_type {
             /// value is not representable.
             ///
             /// The syntax is the same as for [`parse`](Self::parse). An exact
-            /// result uses the preferred exponent, the written exponent minus
-            /// the number of digits after the decimal point, or the
+            /// result uses the preferred exponent, the negative number of
+            /// digits after the decimal point, or the
             /// representable exponent closest to it; a rounded result uses the
             /// least possible exponent. A zero result, exact or rounded, has
             /// the written sign.
@@ -1104,7 +1098,7 @@ macro_rules! decimal_type {
             /// assert_eq!(x.trim_fraction_zeros().to_string(), "1.5");
             /// let integer = Decimal32::parse("1500")?;
             /// assert_eq!(integer.trim_fraction_zeros().to_bits(), integer.to_bits());
-            /// let zero = Decimal32::parse("0E+5")?;
+            /// let zero = Decimal32::from_coefficient_and_exponent(0, 5)?;
             /// assert_eq!(zero.trim_fraction_zeros().to_bits(), zero.to_bits());
             /// let snan = Decimal32::from_bits(0xfe00_0007)?;
             /// assert_eq!(snan.trim_fraction_zeros().to_bits(), 0xfc00_0007);
@@ -1137,8 +1131,8 @@ macro_rules! decimal_type {
             /// use bidecimal::Decimal32;
             /// assert_eq!(Decimal32::parse("1.5000")?.strip_trailing_zeros().to_string(), "1.5");
             /// assert_eq!(Decimal32::parse("1500")?.strip_trailing_zeros().to_bits(),
-            ///            Decimal32::parse("15E+2")?.to_bits());
-            /// assert_eq!(Decimal32::parse("0E+5")?.strip_trailing_zeros().to_bits(),
+            ///            Decimal32::from_coefficient_and_exponent(15, 2)?.to_bits());
+            /// assert_eq!(Decimal32::from_coefficient_and_exponent(0, 5)?.strip_trailing_zeros().to_bits(),
             ///            Decimal32::ZERO.to_bits());
             /// let snan = Decimal32::from_bits(0xfe00_0007)?;
             /// assert_eq!(snan.strip_trailing_zeros().to_bits(), 0xfc00_0007);

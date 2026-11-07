@@ -63,7 +63,7 @@
 //! strings. Deserialization accepts strings or exact integers and requires
 //! a format supporting `deserialize_any`. Fractional values must be sent as
 //! strings; floating-point inputs are rejected. String round trips do not
-//! retain positive exponents (`1E+5` becomes `"100000"`) or NaN sign, payload,
+//! retain positive exponents (coefficient 1, exponent 5 becomes `"100000"`) or NaN sign, payload,
 //! or signaling state. `OrderedDecimal<T>` delegates to its wrapped value.
 //!
 //! # Example

@@ -71,7 +71,7 @@ fn reference(fields: &Bid) -> String {
 
 /// Unsigned text of `len` bytes with the 34 boundary digits after `0.`.
 fn unsigned(len: usize) -> String {
-    format!("{DIGITS}e-{}", len - 2)
+    format!("0.{}{DIGITS}", "0".repeat(len - 2 - DIGITS.len()))
 }
 
 /// Checks the text of `value` against the reference, as `Display`, padded,
@@ -79,6 +79,10 @@ fn unsigned(len: usize) -> String {
 /// serialization into a reused buffer and `Display` with and without padding.
 fn case<T: Value>(c: &mut Criterion, name: &str, text: &str, len: usize) {
     let value = T::parse(text);
+    case_value(c, name, value, len);
+}
+
+fn case_value<T: Value>(c: &mut Criterion, name: &str, value: T, len: usize) {
     let expected = reference(&value.fields());
     assert_eq!(expected.len(), len, "{name}");
     assert_eq!(value.to_string(), expected, "{name}");
@@ -133,16 +137,16 @@ fn bench(c: &mut Criterion) {
         } else {
             format!("p{exp}")
         };
-        case::<Decimal128>(
+        case_value(
             c,
             &format!("d128_nines_{tag}"),
-            &format!("{NINES}e{exp}"),
+            Decimal128::from_coefficient_and_exponent(NINES.parse().unwrap(), exp).unwrap(),
             len,
         );
-        case::<Decimal128>(
+        case_value(
             c,
             &format!("d128_nines_{tag}_neg"),
-            &format!("-{NINES}e{exp}"),
+            -Decimal128::from_coefficient_and_exponent(NINES.parse().unwrap(), exp).unwrap(),
             len + 1,
         );
     }
@@ -159,9 +163,18 @@ fn bench(c: &mut Criterion) {
     }
     // Long text: many zeros after the point, the smallest exponent, and the
     // largest integer.
-    case::<Decimal128>(c, "d128_nines_m200", &format!("{NINES}e-200"), 202);
-    case::<Decimal128>(c, "d128_min_exp", "1e-6176", 6178);
-    case::<Decimal128>(c, "d128_max", &format!("{NINES}e6111"), 6145);
+    case::<Decimal128>(
+        c,
+        "d128_nines_m200",
+        &reference(&Bid {
+            negative: false,
+            coeff: NINES.parse().unwrap(),
+            exp: -200,
+        }),
+        202,
+    );
+    case::<Decimal128>(c, "d128_min_exp", &format!("0.{}1", "0".repeat(6175)), 6178);
+    case_value(c, "d128_max", Decimal128::MAX, 6145);
 }
 
 criterion_group! { name = benches; config = Criterion::default()

@@ -8,6 +8,21 @@ use crate::refbid::{Finite, Format};
 use crate::test_support::*;
 use crate::{Decimal32, Decimal64, Decimal128, Error, Rounding};
 
+fn plain(negative: bool, digits: &str, exponent: i32) -> String {
+    let sign = if negative { "-" } else { "" };
+    if exponent >= 0 {
+        format!("{sign}{digits}{}", "0".repeat(exponent as usize))
+    } else {
+        let places = exponent.unsigned_abs() as usize;
+        if places >= digits.len() {
+            format!("{sign}0.{}{digits}", "0".repeat(places - digits.len()))
+        } else {
+            let split = digits.len() - places;
+            format!("{sign}{}.{}", &digits[..split], &digits[split..])
+        }
+    }
+}
+
 pub(crate) fn actual(s: &str, format: Format, mode: Option<Rounding>) -> Result<Value, Error> {
     macro_rules! parse {
         ($ty:ty) => {
@@ -34,12 +49,7 @@ pub(crate) fn reference(
 ) -> Result<Finite, Error> {
     let neg = s.starts_with('-');
     let unsigned = s.strip_prefix(['+', '-']).unwrap_or(s);
-    let mut pieces = unsigned.split(['e', 'E']);
-    let significand = pieces.next().unwrap();
-    let exponent = pieces.next();
-    if pieces.next().is_some() {
-        return Err(Error::InvalidInput);
-    }
+    let significand = unsigned;
     let mut halves = significand.split('.');
     let integer = halves.next().unwrap();
     let fraction = halves.next();
@@ -51,23 +61,24 @@ pub(crate) fn reference(
     if all_digits.is_empty() || !all_digits.bytes().all(|b| b.is_ascii_digit()) {
         return Err(Error::InvalidInput);
     }
-    // Independent threshold: longer than the input plus every format's range.
-    let threshold = s.len() as i128 + 20_000;
-    let written = match exponent {
-        None => 0,
-        Some(text) => {
-            let exp_neg = text.starts_with('-');
-            let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
-            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(Error::InvalidInput);
-            }
-            let magnitude = digits.bytes().fold(0_i128, |n, b| {
-                (n * 10 + i128::from(b - b'0')).min(threshold)
-            });
-            if exp_neg { -magnitude } else { magnitude }
-        }
-    };
-    let preferred = written - fraction.len() as i128;
+    numeric_reference(
+        neg,
+        &all_digits,
+        -(fraction.len() as i128),
+        format,
+        mode,
+        powers,
+    )
+}
+
+pub(crate) fn numeric_reference(
+    neg: bool,
+    all_digits: &str,
+    preferred: i128,
+    format: Format,
+    mode: Option<Rounding>,
+    powers: &Powers,
+) -> Result<Finite, Error> {
     let significant = all_digits.trim_start_matches('0');
     let (p, lo, hi) = bounds(format);
     if significant.is_empty() {
@@ -196,16 +207,16 @@ fn parse_coefficient_exponent_sign_and_range_classes() {
                 hi + 1,
             ] {
                 for sign in ["", "-"] {
-                    check(&format!("{sign}{coeff}e{exp}"), format, &powers);
+                    check(
+                        &plain(sign == "-", &coeff.to_string(), exp),
+                        format,
+                        &powers,
+                    );
                 }
             }
         }
         for v in classes(format, format) {
-            check(
-                &format!("{}{}e{}", if v.neg { "-" } else { "" }, v.coeff, v.exp),
-                format,
-                &powers,
-            );
+            check(&plain(v.neg, &v.coeff.to_string(), v.exp), format, &powers);
         }
         for n in [34, 35, 36, 40] {
             for tail in ['0', '1', '9'] {
@@ -218,7 +229,7 @@ fn parse_coefficient_exponent_sign_and_range_classes() {
                     hi - n as i32 + p as i32,
                 ] {
                     for sign in ["", "-"] {
-                        check(&format!("{sign}{digits}e{exp}"), format, &powers);
+                        check(&plain(sign == "-", &digits, exp), format, &powers);
                     }
                 }
             }
@@ -227,16 +238,20 @@ fn parse_coefficient_exponent_sign_and_range_classes() {
             let max = 10_u128.pow(p) - 1;
             for sign in ["", "-"] {
                 check(
-                    &format!("{sign}{}e{hi}", max as i128 + delta),
+                    &plain(sign == "-", &(max as i128 + delta).to_string(), hi),
                     format,
                     &powers,
                 );
                 check(
-                    &format!("{sign}{}e{}", max * 10 + 1, hi - 1),
+                    &plain(sign == "-", &(max * 10 + 1).to_string(), hi - 1),
                     format,
                     &powers,
                 );
-                check(&format!("{sign}{}e{}", delta + 2, lo - 1), format, &powers);
+                check(
+                    &plain(sign == "-", &(delta + 2).to_string(), lo - 1),
+                    format,
+                    &powers,
+                );
             }
         }
         for s in [
@@ -253,7 +268,7 @@ fn parse_coefficient_exponent_sign_and_range_classes() {
 }
 
 #[test]
-fn parse_unbounded_digits_saturation_and_scale_clamps() {
+fn parse_unbounded_digits_and_exponent_rejection() {
     let powers = Powers::new(13_000);
     for format in FORMATS {
         for n in [10_000, 1_000_000] {
@@ -291,11 +306,11 @@ fn parse_long_nonzero_significands_in_range() {
     let inputs = [
         format!("1.{}", "1".repeat(7_000)),
         format!("-0.{}", "9".repeat(10_000)),
-        format!("{}e-4990", "9".repeat(5_000)),
-        format!("-{}e-10780", "123456789".repeat(1_200)),
-        format!("1{}1e-3001", "0".repeat(3_000)),
+        plain(false, &"9".repeat(5_000), -4990),
+        plain(true, &"123456789".repeat(1_200), -10780),
+        format!("1.{}1", "0".repeat(3_000)),
         format!("0.{}{}", "0".repeat(6_000), "1".repeat(6_000)),
-        format!("{}e-99990", "7".repeat(100_000)),
+        plain(false, &"7".repeat(100_000), -99990),
     ];
     for format in FORMATS {
         for s in &inputs {
@@ -330,7 +345,11 @@ fn parse_accumulator_chunk_and_exact_dispatch_boundaries() {
         for coeff in [0, 1, 10_u128.pow(p) - 1, 10_u128.pow(p)] {
             for exp in [lo - 1, lo, lo + 1, hi - 1, hi, hi + 1] {
                 for sign in ["", "-"] {
-                    check(&format!("{sign}{coeff}e{exp}"), format, &powers);
+                    check(
+                        &plain(sign == "-", &coeff.to_string(), exp),
+                        format,
+                        &powers,
+                    );
                 }
             }
         }
@@ -382,12 +401,6 @@ pub(crate) fn fuzz_valid(rng: &mut Rng) -> String {
         if i < count {
             s.push((b'0' + (rng.next() % 10) as u8) as char);
         }
-    }
-    if rng.next() & 1 != 0 {
-        s.push(if rng.next() & 1 == 0 { 'e' } else { 'E' });
-        s.push_str(["", "+", "-"][(rng.next() % 3) as usize]);
-        s.push_str("000");
-        s.push_str(&(rng.next() % 13_000).to_string());
     }
     s
 }
@@ -596,4 +609,76 @@ fn parse_short_significands_match_independent_reference() {
         }
     }
     std::eprintln!("short significands against the independent reference: {count} inputs");
+}
+
+#[test]
+fn exponent_notation_rejected_at_every_fast_path_position() {
+    fn reject(text: &str) {
+        macro_rules! width {
+            ($ty:ty) => {{
+                assert_eq!(<$ty>::parse(text), Err(Error::InvalidInput), "{text}");
+                assert_eq!(text.parse::<$ty>(), Err(Error::InvalidInput), "{text}");
+                for dir in [Rounding::TowardNegative, Rounding::TowardPositive] {
+                    assert_eq!(
+                        <$ty>::parse_rounded(text, dir),
+                        Err(Error::InvalidInput),
+                        "{text}"
+                    );
+                }
+                #[cfg(any(
+                    feature = "sqlx-0_9-mysql",
+                    feature = "diesel-2-mysql",
+                    feature = "mysql_common-0_37",
+                    feature = "sqlx-0_9-postgres",
+                    feature = "diesel-2-postgres",
+                    feature = "postgres-types-0_2"
+                ))]
+                {
+                    assert_eq!(
+                        crate::database::decode_text::<$ty>(text.as_bytes(), false),
+                        Err(Error::InvalidInput)
+                    );
+                    assert_eq!(
+                        crate::database::decode_text::<$ty>(text.as_bytes(), true),
+                        Err(Error::InvalidInput)
+                    );
+                }
+                #[cfg(feature = "serde")]
+                assert!(
+                    serde_json::from_str::<$ty>(&serde_json::to_string(text).unwrap()).is_err()
+                );
+            }};
+        }
+        width!(Decimal32);
+        width!(Decimal64);
+        width!(Decimal128);
+    }
+    for len in 1..=37 {
+        for pos in 0..len {
+            for marker in ['e', 'E'] {
+                let mut text = "1".repeat(len);
+                text.replace_range(pos..pos + 1, &marker.to_string());
+                for sign in ["", "+", "-"] {
+                    reject(&format!("{sign}{text}"));
+                }
+            }
+        }
+    }
+    for text in [
+        "1e5",
+        "1E5",
+        "1e+5",
+        "1e-5",
+        "+1.5e3",
+        "-.5E-3",
+        "0e0",
+        "1e",
+        "e5",
+        ".e1",
+        "1e99999999999999999999999",
+    ] {
+        reject(text);
+    }
+    reject(&format!("1e{}", "9".repeat(100_000)));
+    reject(&format!("{}e1", "9".repeat(100_000)));
 }

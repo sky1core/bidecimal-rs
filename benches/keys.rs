@@ -63,7 +63,10 @@ where
         } else {
             pairs(rng, distribution, T::DIGITS)
         };
-        let values: Vec<(T, T)> = specs.iter().map(|(x, y)| (x.parse(), y.parse())).collect();
+        let values: Vec<(T, T)> = specs
+            .iter()
+            .map(|(x, y)| (x.construct(), y.construct()))
+            .collect();
         let keys: Vec<(Key<T>, Key<T>)> = values.iter().map(|&(a, b)| (key(a), key(b))).collect();
         for ((x, y), &(a, b)) in specs.iter().zip(&values) {
             let order = x.value().cmp(&y.value());
@@ -91,7 +94,7 @@ where
                 _ => rng.zero().form(rng.below(3) as u32),
             })
             .collect();
-        let keys: Vec<Key<T>> = specs.iter().map(|s| key(s.parse())).collect();
+        let keys: Vec<Key<T>> = specs.iter().map(|s| key(s.construct())).collect();
         for (spec, k) in specs.iter().zip(&keys) {
             let base = Spec {
                 neg: spec.neg && spec.coeff != 0,
@@ -100,7 +103,7 @@ where
             };
             assert_eq!(
                 build.hash_one(k),
-                build.hash_one(key(base.parse::<T>())),
+                build.hash_one(key(base.construct::<T>())),
                 "{spec:?}"
             );
         }
@@ -125,7 +128,10 @@ fn cross<S: Number + PartialEq<L> + PartialOrd<L>, L: Number>(
 ) {
     for distribution in ["cohort", "random"] {
         let specs = pairs(rng, distribution, S::DIGITS);
-        let values: Vec<(S, L)> = specs.iter().map(|(x, y)| (x.parse(), y.parse())).collect();
+        let values: Vec<(S, L)> = specs
+            .iter()
+            .map(|(x, y)| (x.construct(), y.construct()))
+            .collect();
         for ((x, y), &(a, b)) in specs.iter().zip(&values) {
             let order = x.value().cmp(&y.value());
             assert_eq!(a == b, order == Ordering::Equal, "{a:?} == {b:?}");
@@ -190,8 +196,10 @@ fn comparison32(c: &mut Criterion) {
                 (a, b)
             })
             .collect();
-        let values: Vec<(Decimal32, Decimal32)> =
-            specs.iter().map(|(a, b)| (a.parse(), b.parse())).collect();
+        let values: Vec<(Decimal32, Decimal32)> = specs
+            .iter()
+            .map(|(a, b)| (a.construct(), b.construct()))
+            .collect();
         let keys: Vec<_> = values.iter().map(|&(a, b)| (key(a), key(b))).collect();
         for ((a, b), &(x, y)) in specs.iter().zip(&values) {
             let order = a.value().cmp(&b.value());

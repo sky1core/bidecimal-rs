@@ -58,7 +58,10 @@ where
             _ => panic!("unknown distribution {distribution}"),
         })
         .collect();
-    let keys: Vec<Key<T>> = specs.iter().map(|&s| OrderedDecimal(s.parse())).collect();
+    let keys: Vec<Key<T>> = specs
+        .iter()
+        .map(|&s| OrderedDecimal(s.construct()))
+        .collect();
     let build = Build::default();
     for (spec, key) in specs.iter().zip(&keys) {
         let base = Spec {
@@ -68,7 +71,7 @@ where
         };
         assert_eq!(
             build.hash_one(key),
-            build.hash_one(OrderedDecimal(base.parse::<T>())),
+            build.hash_one(OrderedDecimal(base.construct::<T>())),
             "{spec:?}"
         );
     }
@@ -88,8 +91,8 @@ where
             let y = x.form(1 + rng.below(2) as u32);
             let (x, y) = if rng.next() & 1 == 0 { (x, y) } else { (y, x) };
             let (a, b) = (
-                OrderedDecimal(x.parse::<T>()),
-                OrderedDecimal(y.parse::<T>()),
+                OrderedDecimal(x.construct::<T>()),
+                OrderedDecimal(y.construct::<T>()),
             );
             assert_eq!(a.cmp(&b), x.value().cmp(&y.value()), "{x:?}, {y:?}");
             (a, b)
@@ -105,7 +108,7 @@ fn floor_products() -> Pairs<Decimal128> {
     (0..COUNT)
         .map(|_| {
             let (x, y) = (rng.spec(digits), rng.spec(digits));
-            let (a, b) = (x.parse(), y.parse());
+            let (a, b) = (x.construct(), y.construct());
             let product = Decimal128::mul_rounded(a, b, Rounding::TowardNegative)
                 .unwrap_or_else(|error| panic!("{x:?}, {y:?}: {error:?}"));
             let expected =
@@ -127,7 +130,7 @@ fn floor_quotients() -> Pairs<Decimal128> {
         let Some(expected) = floor_quotient(x, y, digits) else {
             continue;
         };
-        let (a, b) = (x.parse(), y.parse());
+        let (a, b) = (x.construct(), y.construct());
         let quotient = Decimal128::div_rounded(a, b, Rounding::TowardNegative)
             .unwrap_or_else(|error| panic!("{x:?}, {y:?}: {error:?}"));
         assert_eq!(decoded(quotient), expected, "{x:?}, {y:?}");
@@ -149,8 +152,8 @@ where
         let base = rng.spec(T::DIGITS - 2);
         if seen.insert(base.canonical()) {
             let form = rng.below(3) as u32;
-            keys.push(OrderedDecimal(base.form(form).parse::<T>()));
-            queries.push(OrderedDecimal(base.form((form + 1) % 3).parse::<T>()));
+            keys.push(OrderedDecimal(base.form(form).construct::<T>()));
+            queries.push(OrderedDecimal(base.form((form + 1) % 3).construct::<T>()));
         }
     }
     let set: HashSet<Key<T>, Build> = build(&keys);

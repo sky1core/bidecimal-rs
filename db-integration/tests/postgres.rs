@@ -448,8 +448,10 @@ async fn suite(mut driver: Driver) -> Result<()> {
                 "-0.0000".to_owned(),
                 "-123.4500".to_owned(),
                 $long.to_owned(),
-                format!("1e{}", <$ty>::MIN_EXP),
-                format!("{}e{}", "9".repeat(<$ty>::DIGITS as usize), <$ty>::MAX_EXP),
+                <$ty>::from_coefficient_and_exponent(1, <$ty>::MIN_EXP)
+                    .unwrap()
+                    .to_string(),
+                <$ty>::MAX.to_string(),
             ];
             for source in sources {
                 context = CaseContext::new(stringify!($ty), source.clone());

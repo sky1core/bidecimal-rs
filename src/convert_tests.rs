@@ -198,7 +198,7 @@ fn operand_bound_converts_to_decimal128() {
     }
     let a = Decimal32::parse("-1.25").expect("valid");
     let b = Decimal64::parse("3.500").expect("valid");
-    let c = Decimal128::parse("7e-3").expect("valid");
+    let c = Decimal128::from_coefficient_and_exponent(7, -3).expect("valid");
     assert_eq!(operand(a).to_bits(), Decimal128::from(a).to_bits());
     assert_eq!(operand(b).to_bits(), Decimal128::from(b).to_bits());
     assert_eq!(operand(c).to_bits(), c.to_bits());

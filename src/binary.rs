@@ -12,7 +12,8 @@
 use crate::layout::{InRange, Unpacked, Width};
 use crate::operand::sealed::Class;
 use crate::tables::{
-    BINARY_POW5, BINARY_POW5_CACHE, BINARY_SUBNORMAL_POW5, F32_POW10, F64_POW10, pow10, pow10_64,
+    BINARY_POW5, BINARY_POW5_CACHE, BINARY_POW5_CACHE_EXT, BINARY_SUBNORMAL_POW5, F32_POW10,
+    F64_POW10, pow10, pow10_64,
 };
 
 pub(crate) enum Converted<W: Width> {
@@ -531,31 +532,7 @@ fn from_bits<W: Width, const SINGLE: bool>(bits: u64) -> Converted<W> {
             return rounded_integer::<W>(u128::from(significand) * power, quantum, neg, precision);
         }
     }
-    let mut integer = DecimalInteger::new(significand);
-    if exponent < 0 {
-        let mut remaining = exponent.unsigned_abs();
-        if remaining >= 999 {
-            integer = deep_subnormal_expansion(significand, remaining);
-            remaining %= 27;
-        }
-        while remaining >= 27 {
-            integer.multiply(BINARY_POW5[27] as u64);
-            remaining -= 27;
-        }
-        if remaining != 0 {
-            integer.multiply(BINARY_POW5[remaining as usize] as u64);
-        }
-    } else {
-        let mut remaining = exponent as u32;
-        while remaining >= 63 {
-            integer.multiply(1 << 63);
-            remaining -= 63;
-        }
-        if remaining != 0 {
-            integer.multiply(1 << remaining);
-        }
-    }
-    integer.round::<W>(quantum, neg, precision)
+    from_binary_slow::<W>(significand, exponent, quantum, neg, precision)
 }
 
 #[expect(
@@ -631,3 +608,147 @@ fn finish<W: Width>(
         exp: exponent,
     }))
 }
+
+// Fixed-point logarithms, not general-purpose approximations. Arithmetic
+// signed shifts implement floor, including negative exponents. The exact
+// identities over these finite domains are checked with BigUint in tests:
+// floor(E * log10(2)) = (E * 78913) >> 18, -1074 <= E <= 1023;
+// floor(s * log2(10)) = (s * 217706) >> 16, -342 <= s <= 338.
+// Both products fit i32. Changing the supported source format requires
+// re-establishing the domains, cache coverage and these integer identities.
+
+#[inline(never)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "decoded nonzero significand has at most 53 bits; E in -1074..1023 and s in -342..338 bound log products; positive shifts are checked before use; two endpoint sums are checked"
+)]
+// Certify rounding of m * 2^e without expanding all decimal digits.
+// Called only after the exact u128 paths fail, with 0 < m < 2^53,
+// precision in {6, 7, 15}, and a sealed decimal width's qmin. Cancellation
+// preserves the binary value and E=e+floor(log2(m)) remains in -1074..1023.
+// The cached normalized product encloses the exact scaled value in [low, low+2].
+// Both endpoints must select the same decimal grid and nearest-even result;
+// otherwise the caller retains the original exact expansion fallback.
+fn interval_from_binary(m: u64, e: i32, precision: u32, qmin: i32) -> Option<(u128, i32)> {
+    let bitlen = m.bit_width();
+    let big_e = e + bitlen as i32 - 1;
+    // Since 2^E <= x < 2^(E+1), floor(log10(2^E)) underestimates
+    // floor(log10(x)) by at most one. Before the qmin clamp, scaling by
+    // 10^-q gives less than 2*10^precision, so at most one decimal digit
+    // must be dropped. The clamp can only decrease the scaled value.
+    let q = (((big_e * 78913) >> 18) - precision as i32 + 1).max(qmin);
+    let s = -q;
+    let c = if s <= 308 {
+        *BINARY_POW5_CACHE.get((s + 342) as usize)?
+    } else {
+        *BINARY_POW5_CACHE_EXT.get((s - 309) as usize)?
+    };
+    let z = m.leading_zeros();
+    let w = m << z;
+    let product_lo = u128::from(w) * u128::from(c as u64);
+    let low = (u128::from(w) * (c >> 64)).checked_add(product_lo >> 64)?;
+    // Cache truncation plus discarded product bits contribute less than two.
+    let high = low.checked_add(2)?;
+    let shift = -(e + ((s * 217706) >> 16) - 63 - z as i32);
+    #[cfg(test)]
+    let (low, high, shift) = interval_tests::observe_interval(low, high, shift, precision);
+    if shift <= 0 {
+        return None;
+    }
+    if shift > 128 {
+        return Some((0, q));
+    }
+    let shift = shift as u32;
+    let threshold = pow10(precision);
+    let lower_long = if shift == 128 {
+        false
+    } else {
+        (low >> shift) >= threshold
+    };
+    let upper_long = if shift == 128 {
+        false
+    } else {
+        (high >> shift) >= threshold
+    };
+    // Do not guess the digit count when the interval straddles its threshold.
+    if lower_long != upper_long {
+        return None;
+    }
+    let a = interval_endpoint(low, shift, lower_long);
+    let b = interval_endpoint(high, shift, lower_long);
+    if a != b {
+        return None;
+    }
+    Some((a, q + i32::from(lower_long)))
+}
+
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "caller certifies shift in 1..128; 128 has its own branch; rounded coefficient is bounded by the at-most 15-digit target"
+)]
+fn interval_endpoint(h: u128, shift: u32, drop10: bool) -> u128 {
+    if shift == 128 {
+        return u128::from(h > (1_u128 << 127));
+    }
+    let integer = h >> shift;
+    let fraction = h & ((1_u128 << shift) - 1);
+    if drop10 {
+        let quotient = integer / 10;
+        let digit = integer % 10;
+        quotient + u128::from(digit > 5 || (digit == 5 && (fraction != 0 || quotient & 1 != 0)))
+    } else {
+        let half = 1_u128 << (shift - 1);
+        integer + u128::from(fraction > half || (fraction == half && integer & 1 != 0))
+    }
+}
+
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "remaining decreases only after chunk-bound checks; residual indexes are 1..26 and shifts are below 63"
+)]
+#[inline(never)]
+fn from_binary_slow<W: Width>(
+    significand: u64,
+    exponent: i32,
+    quantum: i32,
+    neg: bool,
+    precision: u32,
+) -> Converted<W> {
+    if let Some((coefficient, quantum)) =
+        interval_from_binary(significand, exponent, precision, W::LAYOUT.qmin)
+    {
+        return finish::<W>(coefficient, quantum, neg, precision);
+    }
+    #[cfg(test)]
+    interval_tests::observe_exact_fallback();
+    let mut integer = DecimalInteger::new(significand);
+    if exponent < 0 {
+        let mut remaining = exponent.unsigned_abs();
+        if remaining >= 999 {
+            integer = deep_subnormal_expansion(significand, remaining);
+            remaining %= 27;
+        }
+        while remaining >= 27 {
+            integer.multiply(BINARY_POW5[27] as u64);
+            remaining -= 27;
+        }
+        if remaining != 0 {
+            integer.multiply(BINARY_POW5[remaining as usize] as u64);
+        }
+    } else {
+        let mut remaining = exponent as u32;
+        while remaining >= 63 {
+            integer.multiply(1 << 63);
+            remaining -= 63;
+        }
+        if remaining != 0 {
+            integer.multiply(1 << remaining);
+        }
+    }
+    integer.round::<W>(quantum, neg, precision)
+}
+
+#[cfg(test)]
+#[path = "interval_tests.rs"]
+mod interval_tests;

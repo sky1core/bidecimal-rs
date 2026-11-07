@@ -78,18 +78,19 @@ retained. `to_f64` and `to_f32` round the exact decimal directly to the named
 binary format. These are value-returning methods, not additional modes of
 the arithmetic, parsing, quantize, width-conversion or serde APIs.
 
-**Verification status.** The current implementation has manual
-whole-domain arguments and independent exact-rational tests, including every
-new path boundary and every cache entry. On 2026-11-06 it passed the gates and
-all four exhaustive conversion tests listed in the next table, each exhaustive
-sign lane as one complete run. The four exhaustive checksums equal those
+**Historical verification status (before the binary-input interval path).**
+The implementation tested on 2026-11-06 had manual whole-domain arguments and
+independent exact-rational tests for its path boundaries and cache entries.
+It passed the gates and all four exhaustive conversion tests listed in the
+next table, each exhaustive sign lane as one complete run. Those results do
+not certify the later binary-input interval path. The four exhaustive checksums equal those
 recorded for the preceding implementation. The 2026-11-04 gates and the
 2026-11-05 full Decimal32/binary32 checks recorded further below apply to the
 earlier text-based implementation and remain historical evidence. No direct
 Verus or Kani proof of these methods is claimed. Existing helper proofs do not
 extend to these callers.
 
-| Check on the current implementation | Result |
+| Check on the 2026-11-06 implementation | Result |
 |---|---|
 | `cargo fmt --check`; clippy `--all-targets -D warnings`, default, `serde` and all features | Passed |
 | `cargo test --locked`, default / `serde` library | 132 pass, 23 ignored / 150 pass, 24 ignored; each doctest suite 7 pass |
@@ -158,8 +159,9 @@ The manual obligations for the exact algorithm selection are:
 3. **Fixed-width exact expansion.** If e>=0 and `bit_width(m)+e <= 128`,
    `m << e` fits u128. If e<0, k=-e<=55 and
    `bit_width(m)+bit_width(5^k) <= 128` imply `m*5^k < 2^128`.
-   The test is conservative: uncertified products select limb expansion
-   before multiplication. The nonzero exact integer has at most 39 digits.
+   The test is conservative: uncertified products leave the u128 path
+   before multiplication. The certified interval path described below is
+   tried next; unresolved intervals select the unchanged limb expansion. The nonzero exact integer has at most 39 digits.
    For `0 < drop < 39`, division by the existing `10^drop` table gives an
    exact quotient and remainder. `drop>=39` is below half because
    `2^128 < 5*10^38`. No discarded part is rounded before the final unit
@@ -333,6 +335,75 @@ bit interpretation, not a claim that all external helper routines preserve
 NaN payloads or gradual underflow. Cross-compilation is not ARM runtime
 execution. Caller-modified floating-point environments and arbitrary foreign
 runtime helper replacements have not been validated here.
+
+### Certified interval path from binary
+
+After the existing exact-u128 paths fail, `interval_from_binary` attempts a
+fixed-width certificate before the unchanged exact decimal expansion. It
+receives a nonzero cancelled significand `m < 2^53`, precision 6, 7 or 15,
+and a sealed decimal width's `qmin`. Let `x = m * 2^e` and
+`E = e + floor(log2(m))`; then `-1074 <= E <= 1023`.
+
+The signed fixed-point expressions are exact floor identities on the stated
+finite domains, not approximations licensed for arbitrary inputs:
+
+- `(E * 78913) >> 18 = floor(E * log10(2))`, for E in -1074..=1023.
+- `(s * 217706) >> 16 = floor(s * log2(10))`, for s in -342..=338.
+
+Both products fit i32; arithmetic right shifts are essential for negative
+arguments. The ordinary test `fixed_point_logarithms_and_all_cached_powers_are_exact`
+checks both identities using BigUint power inequalities, without floating-point
+logs. It also reconstructs every one of the 681 normalized cache entries by
+exact division. The original 651-entry table keeps its indexing; the 30-entry
+`BINARY_POW5_CACHE_EXT` in `tables.rs` covers s=309..=338. Tests are finite-domain
+numerical verification, not a machine proof of the converter or generated code.
+
+Put `a = floor(E * log10(2))` and `q = max(a - precision + 1, qmin)`.
+Because `2^E <= x < 2^(E+1)` and log10(2) is less than one, the decimal order
+of x is either a or a+1. Before clamping, `x / 10^q < 2 * 10^precision`,
+so a single extra digit is sufficient; clamping q upward only reduces the
+scaled value. The reachable q range lies within -338..=302, and therefore
+the cache domain covers every reachable s=-q.
+
+For `b = floor(log2(5^s))`, the cache contains
+`C = floor(5^s * 2^(127-b))`. Normalize `w = m * 2^z` to 64 bits. The two
+64-by-64 products compute `low = floor(w*C / 2^64)` exactly. Cache truncation
+and discarded low product bits each contribute less than one, enclosing the
+untruncated normalized product in `[low, low+2]`. The checked additions retain
+fallback on overflow. The identity `floor(s*log2(10)) = s+b` makes the code's
+shift scale this interval to x/10^q.
+
+A nonpositive shift is rejected. For shift greater than 128 the bounded upper
+endpoint scales below one half, certifying zero. Shift 128 is handled separately
+without an invalid Rust shift; exactly one half rounds to even zero. Otherwise
+both endpoints must agree on the decimal digit threshold and nearest-even result.
+If an extra decimal digit is dropped, rounding uses its value together with the
+original binary fraction and retained parity. It does not round twice. Monotonicity
+of nearest-even rounding certifies every value between agreeing endpoints;
+disagreement falls back to exact expansion. The existing `finish` handles decimal
+carry, qmin-compatible zero, exponent padding and overflow, followed by the
+existing public conversion's fractional-zero canonicalization.
+
+`src/interval_tests.rs` is an ordinary, non-ignored test module. It covers
+endpoint neighbors and even/odd ties, shift 128 and a natural shift-129 zero
+certificate, decimal digit dropping, carry, qmin and overflow. The 402 checked-in
+`interval_fixtures.tsv` rows preserve independently generated Python Fraction
+results and separately recorded original-baseline BID bits. They cover both
+source types, all three destination widths, both signs, subnormals, underflow,
+qmin, carry and overflow neighborhoods. `python3 verification/check_interval_fixtures.py`
+rechecks the stored answers with independent rational division and BID encoding;
+it does not call Rust or regenerate the historical baseline column.
+
+Five thread-local, RAII-reset fault modes, compiled only under `cfg(test)`,
+exercise actual helper rejection and exact fallback for every fixture. These
+2,010 checks are synthetic fallback coverage, not evidence that any natural
+source reaches rejection. Uninjected fixture checks exercise ordinary conversion;
+fast and special paths are separately checked to bypass the hooks. A previous
+bounded research search found no natural rejection; this is not a whole-format
+nonreachability claim and does not justify removing fallback. Hooks, counters and
+fault state do not exist in production builds. No full binary64 enumeration,
+direct conversion machine proof, architecture-wide runtime validation or new
+performance result is asserted for the interval path.
 
 ### Independent reference and class coverage obligations
 
@@ -777,7 +848,7 @@ and checks canonical special bits.
 | `special_value_arithmetic_matches_ieee_and_f64` | Sample pairs excluding nonzero finite values that become zero or infinity in f64: exact add/sub/mul/div with a special operand, plus finite division by zero, check result class, zero/nonzero and non-NaN sign against f64, and finite/infinity quotient exponent qmin. Directed add/mul/div with special operands must match their exact forms. |
 | `special_arithmetic_every_width_combination` | All 27 operand/operand/result width combinations, sample pairs augmented with negative quiet and positive signaling NaNs at payloads 999999, 1000000 and the source maximum when they fit. For special operands or finite division by zero, exact and both directed add/sub/mul/div match an independent class rule, including NaN sign, first-operand priority, quieting, payload fitting and finite/infinity zero fields. |
 | `nan_payloads_propagate_and_signaling_nans_are_quieted` | Negative quiet NaN with maximum payload, positive signaling NaN with payload 5, one, infinities and zero: selected arithmetic, quantize and multiple calls check first-NaN sign/payload and quieting, infinity quantize/multiple results, invalid infinite step, zero step and NaN priority over zero-step error. |
-| `directed_overflow_gives_the_ieee_infinity_or_largest_finite_value` | MAX plus one ulp at qmax and its negative counterpart, positive 6*10^(P-1)*10^qmax multiplied by +/-2 or divided by +/-0.5, and parsing +/-1e(qmax+P): exact calls return Overflow and both directions give the specified infinity or largest finite value. |
+| `directed_overflow_gives_the_ieee_infinity_or_largest_finite_value` | MAX plus one ulp at qmax and its negative counterpart, positive 6*10^(P-1)*10^qmax multiplied by +/-2 or divided by +/-0.5, and parsing the plain expansion of +/-10^(qmax+P): exact calls return Overflow and both directions give the specified infinity or largest finite value. |
 | `narrowing_overflow_and_specials` | Decimal128 1e400 narrowed to Decimal64 checks exact overflow; both signs check all directed endpoints. Selected conversions check both infinity signs, a negative signaling Decimal128 NaN with payload 123456789 fitting Decimal64 but not Decimal32, and signaling Decimal32 payload 999999 widened to both widths; selected mixed arithmetic checks infinity cancellation and finite/negative-infinity zero fields. |
 | `from_bits_accepts_exactly_canonical_specials` | Both signs, both NaN kinds and payloads 0, 1, maximum and first invalid; infinities with zero or selected stray bits and NaNs with selected forbidden bits: acceptance, rejection, decoded NaN fields and NaN bit identity. This is a boundary test, not enumeration of every encoding. |
 | `special_value_comparisons_and_classification_match_f64` | Faithful f64 images of sample pairs: equality, inequality, partial comparison and relational predicates; total comparison only for non-NaN, non-cohort pairs. Samples check sign/value tests and categories, with explicit decimal subnormal/normal boundary cases. |
@@ -901,10 +972,11 @@ proof-result files are committed.
 
 The harnesses in `src/layout_proofs.rs`, `src/kernel_proofs.rs` and
 `src/parse_proofs.rs` are compiled only under `cfg(kani)`. The current suite
-contains 75 harnesses, including 11 Decimal32/Decimal64 database-grammar
-fast-path harnesses. On 2026-11-05, the harness list and checks of
+contains 64 harnesses, including 23 parse harnesses. The redundant 11
+database-grammar harnesses were removed when parsing adopted one grammar.
+On 2026-11-05, the historical harness list and checks of
 `verification/kani-suite.sh`, run with `-j 2` instead of its `-j 3`, passed all
-75 harnesses for the current source on aarch64 macOS using Kani 0.68.0. A historical run
+75 harnesses for the then-current source on aarch64 macOS using Kani 0.68.0. A historical run
 on 2026-10-31 passed the 64 harnesses listed at that time using Kani 0.68.0
 (CBMC 6.11.0, `nightly-2026-08-21-x86_64-unknown-linux-gnu`) on Linux x86_64.
 Kani uses its own toolchain, not the stable toolchain in `rust-toolchain.toml`.
@@ -959,9 +1031,8 @@ the proof.
 
 | Harness | Domain | Property | Stub | Outside the proof | Tool |
 |---|---|---|---|---|---|
-| `parse::proofs::parse_32_fast_path_len0` through `parse::proofs::parse_32_fast_path_len9` | every ASCII string of length 0 to 9, every direction and no direction; together these are every length the Decimal32 fast path handles before it passes longer input to `parse_chunks` | A fast-path `Ok` has the sign, coefficient and exponent of the plain decimal reading of the string, with a coefficient below `10^7`; a fast-path `InvalidInput` occurs only for an invalid string whose body is at most one byte; no other error is produced. | `parse_general_with_grammar` and `parse_chunks` are replaced by `kani::assume(false)` | non-ASCII bytes; every input that reaches `parse_general_with_grammar` or `parse_chunks`, and those parsers themselves | Kani 0.68.0 / CBMC 6.11.0 |
-| `parse::proofs::parse_64_fast_path_len8` | every ASCII string of length 8, every direction and no direction | The same property for `parse_64`, with a coefficient below `10^16`. | `parse_general_with_grammar` and `parse_chunks` are replaced by `kani::assume(false)` | non-ASCII bytes; every other length; every input that reaches `parse_general_with_grammar` or `parse_chunks`, and those parsers themselves | Kani 0.68.0 / CBMC 6.11.0 |
-| `parse::proofs::parse_32_decimal_fast_path_len0` through `parse::proofs::parse_32_decimal_fast_path_len9`, `parse::proofs::parse_64_decimal_fast_path_len8` | every ASCII string of length 0 to 9 for Decimal32 and length 8 for Decimal64, every rounding direction and no direction | The database grammar (`ALLOW_EXPONENT=false`) fast-path results match the plain decimal reading: sign, coefficient and exponent agree, the coefficient stays below the width's precision limit, and `InvalidInput` occurs only for invalid text whose body is at most one byte. | `parse_general_with_grammar` and `parse_chunks` are replaced by `kani::assume(false)` | non-ASCII bytes; inputs that reach either fallback, and the fallback parsers themselves | Kani 0.68.0 / CBMC 6.11.0 |
+| `parse::proofs::parse_32_fast_path_len0` through `parse::proofs::parse_32_fast_path_len9` | every ASCII string of length 0 to 9, every direction and no direction; together these are every length the Decimal32 fast path handles before it passes longer input to `parse_chunks` | A fast-path `Ok` has the sign, coefficient and exponent of the plain decimal reading of the string, with a coefficient below `10^7`; a fast-path `InvalidInput` occurs only for an invalid string; no other error is produced. | `parse_general` and `parse_chunks` are replaced by `kani::assume(false)` | non-ASCII bytes; every input that reaches `parse_general` or `parse_chunks`, and those parsers themselves | Kani 0.68.0 / CBMC 6.11.0 |
+| `parse::proofs::parse_64_fast_path_len8` | every ASCII string of length 8, every direction and no direction | The same property for `parse_64`, with a coefficient below `10^16`. | `parse_general` and `parse_chunks` are replaced by `kani::assume(false)` | non-ASCII bytes; every other length; every input that reaches `parse_general` or `parse_chunks`, and those parsers themselves | Kani 0.68.0 / CBMC 6.11.0 |
 
 ### Direct Verus proofs
 
@@ -1153,7 +1224,7 @@ retained evidence is not a substitute for a proof.
 | `eq`/`cmp`: finite canonical operands, `P=max(source precisions)`, coefficients below `10^P`; every gap for P=7, and equality for P=34 | Numeric correctness of the P=7 equality/ordering and the P=34 equality path. P=7 agreement with `cmp_general` is proved over every gap, and P=34 equality agreement at gap 0; the Kani-only reference's numeric correctness has no direct proof. P=16 equality/ordering and P=34 ordering are proved over their whole finite domains by Verus. | The comparison argument below, `comparison_alignment_boundaries_all_width_pairs`, and `comparison_extreme_exponents_all_width_pairs`. |
 | `cmp_general`: finite canonical operands of every width; Kani reference only | Its numeric correctness remains unproved on every domain. It is not compiled into the production library or called by production ordering. P=7 and gap-zero P=34 agreement with this reference do not by themselves establish numeric correctness. | The ordered-exponent digit guard argument below and the comparison tests. |
 | `parse_64`: all accepted and rejected input bytes reaching its 8..17-byte significand paths, both signs and every direction | The complete two-word parser for significands of 9 or more bytes, results produced by the fallback parsers, and non-ASCII input. Only the fast-path results for ASCII strings of length 8 are proved, in the stubbed table above. The hard point is the combined lane conversion and wide coefficient accumulation; a proof of `parse_eight` alone is insufficient. | The SWAR and bounded-scan arguments below, `parse_short_significands_match_independent_reference`, `parse_short_significands_match_general_parser`, and `parse_invalid_bytes_at_each_chunk_position`. |
-| `parse_32`, `parse_chunks` and `parse_general`: all accepted and rejected input strings that reach each parser, both signs and every direction | Every result of `parse_chunks` and `parse_general`, which also receive every input that the fast paths of `parse_32` and `parse_64` pass on, and non-ASCII input. Only the `parse_32` fast-path results for ASCII strings of length 0 to 9 are proved, in the stubbed table above. | The parsing arguments below, `parse_grammar_shapes_and_rejected_classes`, `parse_coefficient_exponent_sign_and_range_classes`, `parse_unbounded_digits_saturation_and_scale_clamps`, `parse_long_nonzero_significands_in_range`, the grammar fuzzers and `decimal32_exhaustive_format_parse_round_trip`. |
+| `parse_32`, `parse_chunks` and `parse_general`: all accepted and rejected input strings that reach each parser, both signs and every direction | Every result of `parse_chunks` and `parse_general`, which also receive every input that the fast paths of `parse_32` and `parse_64` pass on, and non-ASCII input. Only the `parse_32` fast-path results for ASCII strings of length 0 to 9 are proved, in the stubbed table above. | The parsing arguments below, `parse_grammar_shapes_and_rejected_classes`, `parse_coefficient_exponent_sign_and_range_classes`, `parse_unbounded_digits_and_exponent_rejection`, `parse_long_nonzero_significands_in_range`, the grammar fuzzers and `decimal32_exhaustive_format_parse_round_trip`. |
 | `mul` fast path: all finite canonical operand width pairs, each result width and every direction | The operand swap, the exact product from two `u64` carrying multiplications, and the `high=0` and range checks that choose between returning that product and calling `mul_general`. | The exact-product argument below, `mul_exact_product_capacity_widening_and_exponent_boundaries`, `mul_all_width_pairs_coefficient_exponent_sign_classes`, and independent BigInt products. |
 | `mul_general`: all finite canonical operand width pairs, each result width and every direction | Full limb-product reconstruction and its connection to sticky reduction and `fit`. The hard points are symbolic wide multiplication and the following division. | The exact-product argument below, `mul_limb_boundaries_operand_order_and_every_reachable_shift`, `mul_all_width_pairs_coefficient_exponent_sign_classes`, and independent BigInt products. |
 | `div`: all finite canonical operand width pairs, each result width and every direction | The scale `k`, the quotient bounds `10^(P-1)<=Q<10^35` that establish the preconditions of `div_rem_scaled` and `fit`, and the preferred exponent passed to `fit` after stripping. The scaled long division itself is proved by Verus above. The hard point is the digit-length argument over arbitrary coefficient pairs and the cohort argument for the preference. | The division argument below, `div_scale_paths_terminating_quotients_and_precision_carry`, `div_all_width_pairs_coefficient_exponent_sign_classes`, and independent BigInt fractions. |
@@ -1954,8 +2025,8 @@ digit, with working exponent one above the preference. The coefficient is
 at least `10^37`, above `10^(P-1)` for every width. It therefore satisfies
 the existing sticky and preferred-exponent premises of `fit`; the discarded
 fraction is never rounded before `fit`. The fitting argument gives the same
-cohort, single directed rounding, and error classification as parsing the
-exact integer at the preferred exponent. `finish` applies the existing
+cohort, single directed rounding, and error classification for the
+exact integer magnitude at the preferred exponent. `finish` applies the existing
 directed overflow mapping. No new integer kernel is used.
 
 Decomposition rejects infinity and NaN before unpacking. Compile-time bounds
@@ -1968,9 +2039,10 @@ reconstruction preserves the exponent and produces positive zero.
 
 `int_scale_construction_boundary_classes` and
 `int_scale_construction_fixed_seed_differential` compare all three modes
-with both the public parser's bits/errors and the independent arbitrary-precision
-string reference. The latter saturates extreme written exponents using its
-own range argument, avoiding enormous powers for extreme scales.
+with an independent numerical coefficient/exponent reference. Decimal-order
+bounds classify extreme exponents before bounded BigInt rounding; exact
+integer equality controls preferred-cohort restoration. Scale is negated in
+i128, including i32::MIN, independently of the production constructor.
 Decomposition tests use the independent BID decoder, including the accepted
 large-coefficient forms in Decimal32/Decimal64; Decimal128's large form is
 noncanonical. `int_scale_decimal32_exhaustive_reference` is an ignored
@@ -1980,17 +2052,17 @@ its presence alone does not establish exhaustive execution evidence.
 
 The coefficient/exponent and mantissa/scale pairs share one construction and
 decomposition core, and the four accessors read the same stored fields.
-`coefficient_exponent_construction_matches_parser_and_scale` checks exponent
+`coefficient_exponent_construction_matches_numeric_reference_and_scale` checks exponent
 extremes, coefficient extremes, exponent boundaries, and both rounding
-directions against parsing and the scale counterpart. The decomposition class
+directions against the independent numerical reference and the scale counterpart. The decomposition class
 and fixed-seed tests, and the ignored exhaustive test, check all four accessors
 and both pair APIs, including special-value rejection.
 
 ### String parsing
 
 Domain: every UTF-8 string reaching the finite parser. A byte loop accepts
-exactly optional sign, one or more ASCII significand digits with at most one point, and optional `e`/`E`
-with optional sign and one or more ASCII digits. All bytes must be consumed.
+exactly an optional sign and one or more ASCII digits with at most one point.
+Exponent markers `e`/`E` and all other bytes are rejected. All bytes must be consumed.
 The sign is retained independently of the magnitude, including zero. Public
 parsing also accepts the special spellings described in Infinity and NaN.
 
@@ -2015,8 +2087,7 @@ lane is at most `0x7f`, adding `0x7f` reaches at most `0xfe`, so no carry
 crosses lanes and bit 7 of the result is set exactly for a zero lane.
 Compile-time enumeration checks every byte value at every lane against
 all-zero and all-one neighbours. Padding lanes are `0`, so only input
-points are detected. Two or more points dispatch the original string to the
-general parser. A lone point (`L=1`) is rejected. For one point in
+points are detected. Two or more points return `InvalidInput` immediately. A lone point (`L=1`) is rejected. For one point in
 lane l (0..7, counted from the least significant lane), the lanes below it
 are shifted up one lane, the lanes above are kept and lane 0 becomes `0`.
 This deletes the point, prepends one more leading zero, and leaves exactly
@@ -2027,8 +2098,7 @@ lane shift stays below 64 bits; the point-deleted word is still computed
 but is not selected. All shifts are at most 56 bits and masks are formed
 without underflow. The resulting
 eight-byte word is validated and converted by the chunk routine below, so
-any non-digit byte (ASCII, `e`, sign or UTF-8) dispatches to the general
-parser. The path returns directly only for `c<10^7` and an in-range
+any non-digit byte (ASCII, `e`, sign or UTF-8) returns InvalidInput. The path returns directly only for `c<10^7` and an in-range
 preferred exponent. Eight digits at or above `10^7` leave this path even
 if exactly representable after changing exponent; the complete general path
 preserves their required cohort and rounding/error behavior.
@@ -2058,21 +2128,20 @@ take the first and last eight body bytes. The first is shifted left by
 places the body in the high B lanes of the 16-lane word formed with the last
 load as its high half. Point lanes are found exactly by `zero_lanes` on both
 halves as for P=7; padding lanes are `0`, so only body points are detected.
-Two or more points dispatch to the general parser. For one point in lane l
+Two or more points return InvalidInput. For one point in lane l
 (0..15), the lanes below it are shifted up one lane, the lanes above are
 kept and lane 0 becomes the lead byte. This deletes the point and leaves
 exactly `15-l` digits to its right, so the preferred exponent is `l-15`.
 Without a body point, a lead `0` (always so for L<17) keeps the word with
-exponent 0, a lead point selects the word with exponent -16, and any other
-lead byte dispatches to the bounded chunk scan, which returns the same
-fields or delegates to the general parser. Then `trailing_zeros(0)/8` is 16,
+exponent 0, a lead point selects the word with exponent -16, and a nonzero digit lead with an all-digit body dispatches to the bounded
+chunk scan for capacity handling. Invalid lead or body bytes return InvalidInput. Then `trailing_zeros(0)/8` is 16,
 the `& 15` mask maps it to lane 0 and the point-deleted word is computed but
 not selected. All lane shifts are at most 120 bits and masks are formed
 without underflow. Every byte of the selected word is validated as an ASCII
 digit by the chunk test applied to both halves at once: high nibbles must be
 `3` and adding 6 to each low nibble (at most 15) must not reach 16, so no
 lane carries into the next. Any other byte, including a lead point moved
-into lane 0, `e`, sign or UTF-8, dispatches to the general parser. Each
+into lane 0, `e`, sign or UTF-8, returns InvalidInput. Each
 half is converted by the chunk recurrence below to a value `<10^8`, and the
 coefficient `high*10^8+low<10^16=10^P` is exact. Its preferred exponent is
 in `[-16,0]`, inside the P=16 range, and `InRange::checked` establishes the
@@ -2088,7 +2157,7 @@ checks this premise and pointer widths <=64. At a point, the remaining
 slice length F is at most 34; `-F` fits i32 and equals the preferred exponent
 after all following bytes have been validated as digits. Empty input and a
 lone point are rejected by `L<=point_count`; a second point, exponent marker,
-or other byte dispatches the original string to the general parser.
+or other byte returns InvalidInput immediately.
 A direct result requires `c<10^P` and an exponent within the destination
 range. Leading zeros do not change the recurrence or the preferred
 exponent. The direct-result proof below applies to every field and mode.
@@ -2120,63 +2189,43 @@ k<=7 before end or its first nondigit. Its u32 recurrence gives
 `tail<10^k` and `factor=10^k<=10^7<u32::MAX`, with that bound checked at
 compile time. Combining `c*factor+tail` is the same bounded concatenation.
 After a point the scan repeats on the remaining slice; after any other
-nondigit it uses the complete general parser. Chunk consumption decreases
+nondigit it returns InvalidInput immediately. Chunk consumption decreases
 the slice by eight; scalar and point consumption use checked slice splits
 and decrease it by one. No public-input slice indexing is used.
 
 When no digits were dropped, the retained length is at most P, and
-`qmin <= E-F <= qmax`, the parser returns `(sign,c,E-F)` directly.
+`qmin <= -F <= qmax`, the parser returns `(sign,c,-F)` directly.
 The recurrence gives `c<10^P`, including c=0. In `fit`, the precision
 and underflow shifts are both zero, the remainder and sticky are zero,
 and the preferred exponent already equals the working exponent. Thus
 neither rounding direction changes any field, and the direct result is
 bit-identical to the general result, including the sign and exponent of zero.
 The precision and exponent premises are checked at dispatch; the complement
-continues through the complete retained-digit, saturation and clamping path.
+continues through the complete retained-digit path.
 
-Let F be the count of all fractional digits, D the count of all discarded
-digits, and E the signed written exponent. The original preferred exponent is
-`E-F`, never `E-F+D`. The wide exponent is `E-F+D`. Equivalently, if K
-fractional digits were retained or skipped as leading zeros and I integer
-digits were discarded, the wide exponent is `E-K+I`.
-Consequently `preferred<=wide.exp`. An exact result uses the closest attainable
-exponent to the original preference; zero clamps that preference to the type
-range and preserves its written sign. `fit` establishes all encoding bounds.
+Let F be the count of all fractional digits and D the count of discarded
+digits. The preferred exponent is `-F`, and the wide exponent is `D-F`.
+Thus `preferred<=wide.exp`. On supported targets, input length is at most
+`isize::MAX<=2^63-1`. Both counts lie in `[0,input length]`, so `-F` and
+`D-F` fit i64 exactly. No exponent saturation or scale clamp is necessary.
+The i128 scan arithmetic cannot overflow. The fitter handles range, exactness,
+directed rounding, signed zero, and the closest representable preferred cohort.
 
-Supported targets have pointer width at most 64; a string has length at most
-`isize::MAX<=2^63-1`, so each digit count fits i128. The unsigned written
-exponent is saturated at `2^64` before applying its sign. Each accumulation
-step is at most `10*2^64+9`, and both scale computations fit i128. If exponent
-saturation occurs, subtracting F or adding D cannot bring either scale within
-`2^63` of zero: the resulting nonzero value is still far above every maximum
-or below every minimum. Zero depends only on the same clamped preference.
+`parse_unbounded_digits_and_exponent_rejection` covers million-digit inputs
+and huge rejected exponent strings. `parse_coefficient_exponent_sign_and_range_classes`
+uses plain notation for numeric boundaries. `exponent_notation_rejected_at_every_fast_path_position`
+covers all three widths, exact and both directed parses, FromStr, serde strings
+when enabled, and DB text when enabled; every e/E position at lengths 1..37
+is rejected, along with huge exponents and long digit prefixes.
 
-After combining counts, independently clamp both scales to `[-2^40,2^40]`
-and convert to i64. A nonzero retained coefficient has at most 35 digits.
-At either clamped extreme it remains outside every representable range even
-after the largest precision adjustment (34 digits): positive scale overflows;
-negative scale is inexact without a direction, and rounds to signed zero or
-one unit at qmin with a direction. These classifications and zero's exponent
-are identical before and after clamping. If only the preference is clamped,
-the closest attainable exponent is unchanged because all legal exponents lie
-strictly inside the clamp. Clamping is monotone, preserving `preferred<=exp`.
-
-`parse_unbounded_digits_saturation_and_scale_clamps` checks both sides of
-both thresholds with integer/fractional digit counts crossing them, exponent
-strings beyond `2^64`, 10,000 leading/fractional zeros, and million-digit
-inputs. `parse_coefficient_exponent_sign_and_range_classes` checks all widths,
-signs and modes, 34/35/36/40 significant digits, discarded zero/nonzero tails,
-maximum finite neighbors, sub-qmin values, and signed-zero preference.
-
-The independent reference uses a different exponent threshold,
-`input length+20000`. After grammar validation it classifies nonzero values
-by decimal order outside `[qmin-1,qmax+P]`. The lower class is strictly below
-one unit at qmin and the upper strictly exceeds every finite result even
-under directed rounding. Inside that interval it removes exact trailing
-zeros before constructing a BigUint, rounds with `round_integer`, then restores
-the original preference only when independent integer equality proves the
-result exact. This preserves long zero-tail tests without constructing huge
-powers. Reference expected fields never use production parsing or layout.
+The independent text reference validates the single finite grammar before
+calling a numerical reference with coefficient digits and preference `-F`.
+The numerical reference classifies decimal order outside `[qmin-1,qmax+P]`
+before allocating powers, rounds a BigInt with `round_integer`, and restores
+the original preferred cohort only when independent integer equality proves
+exactness. Constructor tests call this numerical reference directly, without
+routing through either text parser. Reference expected fields never use
+production parsing or fitting.
 
 ### Plain notation formatting
 
@@ -2243,7 +2292,7 @@ not establish coverage of the new methods.
 | Trailing-zero specials | Each width's `special_encodings`: both infinity signs, quiet/signaling NaNs with signed boundary payloads, and 10,000 fixed-seed raw encodings per width; quieting, sign and payload preservation, class handling and canonical-input rejection |
 | Decimal32 trailing-zero transformations | `decimal32_exhaustive_trailing_zero_methods_positive` and `decimal32_exhaustive_trailing_zero_methods_negative`: all 3,840,000,000 canonical finite cohorts combined; `decimal32_exhaustive_trailing_zero_special_encodings`: all 268,435,456 raw infinity/NaN-range patterns; see the exact domain and properties below. Recorded execution: three tests passed, with the scope below |
 | Narrowing | `narrowing_all_coefficient_exponent_classes_bigint`: each of three width pairs, all classes and all three modes; `narrowing_three_pairs_bigint_random`: 2,000 values per pair; `narrowing_three_pairs_bigint_million`: 1,000,000 per pair, each in exact mode and both directions |
-| Integer/scale construction | `int_scale_construction_boundary_classes`: every integer digit length through the signed maximum, powers of ten and neighbors, all-nines, trailing-zero coefficients, both signs, MIN/MAX, precision and exponent transitions, scales at both i32 extrema, exact and both directions; `int_scale_construction_fixed_seed_differential`: 2,000 fixed-seed pairs per width, full-range integers and mixed near-range/full-i32 scales, all three modes, against parser bits/errors and independent arbitrary-precision reference |
+| Integer/scale construction | `int_scale_construction_boundary_classes`: every integer digit length through the signed maximum, powers of ten and neighbors, all-nines, trailing-zero coefficients, both signs, MIN/MAX, precision and exponent transitions, scales at both i32 extrema, exact and both directions; `int_scale_construction_fixed_seed_differential`: 2,000 fixed-seed pairs per width, full-range integers and mixed near-range/full-i32 scales, all three modes, against the independent numerical coefficient/exponent reference, including exact cohort fields and errors |
 | Integer/scale decomposition | `int_scale_decomposition_classes_and_roundtrip`: coefficient/exponent classes, every exponent with zero/unit/maximum and steering-boundary neighbors, both signs, both infinities and signed quiet/signaling NaNs at zero/unit/maximum payload; `int_scale_decomposition_fixed_seed_bits`: 10,000 raw patterns per width against independent decoding; `int_scale_documented_contract`: preferred exponent, trailing zeros and negative-zero sign loss; `int_scale_decimal32_exhaustive_reference`: ignored full-domain decomposition/round-trip check |
 | Addition/subtraction | `addsub_all_27_coefficient_gap_sign_classes`: all 27 source/source/result combinations, both operations and all modes, every coefficient digit class paired across widths, both exponent orders, all sign pairs, gaps 0..39, 70, 200, 12000 clipped to the source ranges; `addsub_all_27_bigint_random`: 2,000 pairs per combination, each checked in six operation/mode cases; `addsub_all_27_bigint_million`: 1,000,000 pairs per combination with wall-time output |
 | Addition/subtraction range and zero | `addsub_largest_finite_underflow_and_cancellation`: both signs around destination maximum and minimum exponents, exact/directed overflow, inexact and rounded zero; `addsub_zero_cohorts_and_self_operations`: both-zero signs and extreme exponents, cancellation, equal-value cohorts, x+x, x-x, x-(-x) |
@@ -2256,8 +2305,8 @@ not establish coverage of the new methods.
 | Quantize boundaries | `quantize_zero_all_targets_invalid_targets_and_precision_edges`: both signed zeros at every target, exact scale-up through and past precision, all-nines rounding increment, gaps 38/39, qmin-1/qmax+1/i32 extremes; `quantize_decimal32_exhaustive_reference`: all patterns and fifteen targets, both directions |
 | Rounding to a multiple | `multiple_coefficient_exponent_sign_and_step_cohort_classes`: all value classes and signs for Decimal32/Decimal64 and every 13th class for Decimal128 (with every 5th step) crossed with steps of coefficient 1, 5, 50, 100 at every Decimal32/Decimal64 step exponent and at Decimal128 exponents near zero, the range ends and every 997th exponent, unit steps with every trailing-zero count at the maximum exponent, and general coefficients 2, 3, 7, 25, 125, 999, 1024, 4375, `max/3`, `max-1`, `max`; `multiple_general_steps_every_scale_gap_and_unrepresentable_multiples`: step coefficients 2, 3, 7, 25, 125, 999, 1024, 4375, `max/7`, `max-1` and `max` at exponent gaps -40..75, 110..114, 200, 767, 12286 and 12287 where both exponents fit the width (Decimal32 omits 200 and above, Decimal64 omits 12286 and 12287), including the 38-digit guard and `Inexact`/`Overflow` results; `multiple_all_widths_bigint_random`: 2,000 per width; `multiple_all_widths_bigint_million`: 1,000,000 per width, both directions and wall time |
 | Rounding to a multiple boundaries/errors | `multiple_exact_multiples_carry_overflow_and_signed_zero`: exact multiples, precision carry, largest finite overflow, zero signs/preference; `multiple_zero_and_negative_steps_are_rejected_in_order`: both signed zero steps and negative steps for all three widths; `multiple_carry_below_and_at_range_end_and_precision_limited_exponents`, `multiple_division_exponent_boundaries_every_zero_count_and_both_units`, `multiple_zero_values_of_both_signs_keep_sign_at_step_exponent` |
-| Parsing grammar | `parse_grammar_shapes_and_rejected_classes`: finite significand shapes, optional signs, both exponent markers/signs/leading zeros, invalid numeric syntax and malformed special spellings; FromStr agrees with parse for every width |
-| Parsing numeric/range | `parse_coefficient_exponent_sign_and_range_classes`, `parse_unbounded_digits_saturation_and_scale_clamps`: coefficient/exponent/sign/mode classes, accumulation and saturation boundaries, million-digit input; `parse_long_nonzero_significands_in_range`: nonzero significands of 3,002 to 100,000 significant digits, one with 3,000 interior zeros, within the Decimal128 range and including one near its minimum exponent |
+| Parsing grammar | `parse_grammar_shapes_and_rejected_classes`: finite significand shapes, optional signs, rejected exponent markers/signs/leading zeros, invalid numeric syntax and malformed special spellings; FromStr agrees with parse for every width |
+| Parsing numeric/range | `parse_coefficient_exponent_sign_and_range_classes`, `parse_unbounded_digits_and_exponent_rejection`: coefficient/exponent/sign/mode classes, accumulation/range boundaries, exponent rejection, million-digit input; `parse_long_nonzero_significands_in_range`: nonzero significands of 3,002 to 100,000 significant digits, one with 3,000 interior zeros, within the Decimal128 range and including one near its minimum exponent |
 | Parsing fuzz | `parse_valid_and_invalid_grammar_fuzzer_ten_thousand_per_width_mode`: 10,000 valid plus 10,000 invalid per width, all modes; `parse_valid_and_invalid_grammar_fuzzer_million_per_width_mode`: 1,000,000 of each per width/mode, wall time |
 | Plain/stripped formatting | `format_all_coefficient_exponent_sign_classes_and_extreme_lengths`: full coefficient/exponent/sign classes and the longest 6179-byte text; `format_short_text_boundary_matches_reference`: plain, stripped and padded text of values 111 to 113 bytes long and of coefficients 0, 1, 7, 10, 12345, 10^(p-1), the maximum and, for Decimal128, `u64::MAX` and `u64::MAX + 1`, at every exponent from -116 to 116 the width allows and at the exponent limits and their neighbors, against an independent reference; `format_flags_precision_ignored_and_debug_equals_display`: width below/above length, space/star/Unicode fills, all alignments, sign/zero flags crossed with widths and precision; `format_writer_errors_propagate_on_direct_and_padded_paths`: writer failures |
 | Format/parse differential | `format_parse_random_two_thousand_per_width`: 2,000 independently generated values per width; `format_parse_million_per_width_independent_references`: 1,000,000 per width, plain/stripped strings against independent formatting and parsing in all modes, wall time |
@@ -2408,11 +2457,11 @@ establish the result for all members of each following disjoint path class.
 | Rounding to a multiple, unit path: E>=0/E<0; -E<=19/-E>=20; quotient remainder zero/nonzero; sign x direction; zero result | Exact rational quotient `N*10^E` is already an integer or rounds once at the integer endpoint; 64-bit division is exact on `N<2^63`; the returned zero keeps the sign of `x` at the step exponent | `multiple_division_exponent_boundaries_every_zero_count_and_both_units` crosses -E of 1, 2, P-1, P, P+1, 16..21, 34..39 and 767 where they do not exceed the width maximum (767 exceeds it for Decimal32), and the width maximum and its predecessor, with units 1 and 5 where the exponent range admits them, asserting that each of these values is reached with at least one unit, every step zero count, coefficient remainders and both signs; `multiple_zero_values_of_both_signs_keep_sign_at_step_exponent`, `multiple_coefficient_exponent_sign_and_step_cohort_classes`, `multiple_exact_multiples_carry_overflow_and_signed_zero` |
 | Rounding to a multiple, general path: zero value; q_x>=q_s/q_x<q_s; remainder computed directly or by reduction, or multiple decided by the coprime factor; remainder zero/nonzero; guard pass/fail; up/down; `exceeds_max` true/false; S below/above 10^38 | The exact multiple `M+-t` is built at an exponent no lower than `q_s`; a failed guard leaves a coefficient with no trailing zero and more than `P` digits, so the result is `Inexact` or the exact-magnitude `Overflow` | `multiple_general_steps_every_scale_gap_and_unrepresentable_multiples`, `multiple_coefficient_exponent_sign_and_step_cohort_classes`, `multiple_all_widths_bigint_million` |
 | Rounding to a multiple, unit path: no precision carry/carry to 10^P below or at qmax; e=q_s or e>q_s with shift limited by preference or precision; range overflow | u*I<=c_x+4 and the multiple-of-five bound leave only the exact carry; the shift selects `max(q_s,e-(P-digits(c)))`; an exponent above qmax then implies a magnitude above the maximum | `multiple_carry_below_and_at_range_end_and_precision_limited_exponents`, `multiple_exact_multiples_carry_overflow_and_signed_zero`, `multiple_coefficient_exponent_sign_and_step_cohort_classes` |
-| Parsing SWAR P=7 dispatch: signed significand byte length 0/1..8/>8; coefficient below/at/above 10^7; zero/one/several points at every lane; any nondigit at every lane | Exact zero-lane detection, point-lane deletion and chunk validation give the same fields as fit; all complementary cases use complete parsing | `parse_short_significands_match_general_parser` enumerates every distinct short string over digit, point, exponent, sign, ASCII-boundary and UTF-8 tokens against the general parser in all modes; `parse_short_significands_match_independent_reference` checks every sign, length 1..8 and point position with `/ : . e E \u{0} \u{7f} \u{80} \u{ae}` at every position against the independent reference, because the general parser shares `fit` with this path; `parse_accumulator_chunk_and_exact_dispatch_boundaries`, `parse_invalid_bytes_at_each_chunk_position` cover 7/8/9 digits, 10^7-1/10^7, signs, zeros, points, exponent syntax and invalid bytes |
+| Parsing SWAR P=7 dispatch: signed significand byte length 0/1..8/>8; coefficient below/at/above 10^7; zero/one/several points at every lane; any nondigit at every lane | Exact zero-lane detection, point-lane deletion and chunk validation give the same fields as fit; invalid bytes terminate immediately; valid capacity cases use complete parsing | `parse_short_significands_match_general_parser` enumerates every distinct short string over digit, point, exponent, sign, ASCII-boundary and UTF-8 tokens against the general parser in all modes; `parse_short_significands_match_independent_reference` checks every sign, length 1..8 and point position with `/ : . e E \u{0} \u{7f} \u{80} \u{ae}` at every position against the independent reference, because the general parser shares `fit` with this path; `parse_accumulator_chunk_and_exact_dispatch_boundaries`, `parse_invalid_bytes_at_each_chunk_position` cover 7/8/9 digits, 10^7-1/10^7, signs, zeros, points, rejected exponent syntax and invalid bytes |
 | Parsing SWAR P=16 dispatch: signed significand byte length <8/8..16/17/>17; lead digit `0`, other digit or point; zero/one/several points at every lane; any nondigit at every lane | Exact zero-lane detection over both halves, lead/point-lane deletion and two-half chunk validation give the same fields as fit; all complementary cases use the bounded scan or complete parsing | `parse_short_significands_match_general_parser` (P=16 strings up to 10 bytes over digits, point, exponent and nondigit; digit/point strings up to 22 bytes) in all modes; `parse_short_significands_match_independent_reference` checks every sign, length 1..17, point position and `/ : . e E \u{0} \u{7f} \u{80} \u{ae}` at every position against the independent reference; `parse_invalid_bytes_at_each_chunk_position` covers every invalid ASCII byte and UTF-8 class as the last byte of lengths 8..17 |
-| Parsing bounded scan: signed byte length 0..35/>35; digits with zero/one point or any other byte; coefficient below/at/above capacity; chunk/scalar runs and invalid bytes at every lane | The bounded recurrence and point-offset identity establish the exact fields; every other input reaches the general grammar and fit | `parse_short_significands_match_general_parser` (P=16/34 strings up to 10 bytes over digits, point, exponent and nondigit; digit/point strings up to 22 bytes), `parse_accumulator_chunk_and_exact_dispatch_boundaries`, `parse_invalid_bytes_at_each_chunk_position` cover digit and byte-length boundaries, every point position, exponent markers, ASCII nondigits and UTF-8 classes |
-| Parsing exact dispatch: no dropped digits, retained length <=P and preference in range; or the complement | The direct-result proof establishes equality of every field in all modes; the complementary path uses the complete fit contract | `parse_accumulator_chunk_and_exact_dispatch_boundaries` crosses coefficient capacity, all point positions at digit boundaries, both signs, exponent syntax and qmin/qmax neighbors |
-| Parsing: accepted/rejected grammar; zero/nonzero; retained length 0..35; dropped zero/nonzero; both exponent saturation signs and clamp boundaries | Finite byte grammar is exhaustive; accumulation recurrence and sticky lower bound cover every length and tail; monotone scale clamping preserves range, sign and preference rules | `parse_grammar_shapes_and_rejected_classes`, `parse_coefficient_exponent_sign_and_range_classes`, `parse_unbounded_digits_saturation_and_scale_clamps`, `parse_long_nonzero_significands_in_range`, parsing fuzz tests |
+| Parsing bounded scan: signed byte length 0..35/>35; digits with zero/one point or any other byte; coefficient below/at/above capacity; chunk/scalar runs and invalid bytes at every lane | The bounded recurrence and point-offset identity establish the exact fields; invalid bytes terminate immediately; capacity fallback reaches the general grammar and fit | `parse_short_significands_match_general_parser` (P=16/34 strings up to 10 bytes over digits, point, exponent and nondigit; digit/point strings up to 22 bytes), `parse_accumulator_chunk_and_exact_dispatch_boundaries`, `parse_invalid_bytes_at_each_chunk_position` cover digit and byte-length boundaries, every point position, exponent markers, ASCII nondigits and UTF-8 classes |
+| Parsing exact dispatch: no dropped digits, retained length <=P and preference in range; or the complement | The direct-result proof establishes equality of every field in all modes; the complementary path uses the complete fit contract | `parse_accumulator_chunk_and_exact_dispatch_boundaries` crosses coefficient capacity, all point positions at digit boundaries, both signs, rejected exponent syntax and qmin/qmax neighbors |
+| Parsing: accepted/rejected grammar; zero/nonzero; retained length 0..35; dropped zero/nonzero; extreme digit counts and rejected exponent markers | Finite byte grammar is exhaustive; accumulation recurrence and sticky lower bound cover every length and tail; input-length bounds preserve exact i64 scales and fitting premises | `parse_grammar_shapes_and_rejected_classes`, `parse_coefficient_exponent_sign_and_range_classes`, `parse_unbounded_digits_and_exponent_rejection`, `parse_long_nonzero_significands_in_range`, parsing fuzz tests |
 | Formatting: q>=0/q<0; zero/nonzero; point inside/before digits; strip removes none/some/all fractional zeros | Each finite coefficient has a unique digit string and point position; bounded concatenation preserves exact value and exponent, with signed zero handled explicitly | `format_all_coefficient_exponent_sign_classes_and_extreme_lengths`, `format_parse_random_two_thousand_per_width`, `decimal32_exhaustive_format_parse_round_trip` |
 | Formatting flags absent/present; precision; writer success/failure | `magnitude` and `Parts::write_magnitude` write the same magnitude; padding applies sign/width/alignment as integer padding does, without rounding or allocation; errors propagate | `format_flags_precision_ignored_and_debug_equals_display`, `format_writer_errors_propagate_on_direct_and_padded_paths` |
 | Trailing-zero count 0..33; all zero representations | Exact power division gives a unique nonzero canonical tuple; zeros use a single tuple across widths | `cohort_hashes_cross_width_and_zero_signs`, `strip_trailing_zeros_matches_naive_for_every_power` |
@@ -2510,9 +2559,10 @@ server performance or universal performance parity.
 
 On 2026-11-05, `bash scripts/db-integration.sh all` ran from 21:19:38 to
 21:30:48 UTC on an aarch64 macOS Docker host, exit 0. Each database stage used
-a freshly generated password. Later changes write the same runner URLs as
-plain strings and leave the database adapter and shared codec code
-unchanged. All eight driver suites
+a freshly generated password. The subsequent runner-URL-only adjustment
+wrote the same URLs as plain strings without changing the adapter or codec.
+The current grammar change does modify shared parser dispatch; this historical
+run does not validate the current revision. All eight driver suites
 passed (8/8): MySQL SQLx, Diesel, mysql sync and mysql_async, and PostgreSQL
 SQLx, Diesel, postgres sync and tokio-postgres. The containers used pinned
 MySQL 9.7.4 and PostgreSQL 18.6 images. The command, pinned images, native
@@ -2520,9 +2570,9 @@ client setup and version assertions are documented in
 [the live-test instructions](../db-integration/README.md).
 
 On 2026-11-05, the `verification/kani-suite.sh` harnesses passed 75/75 for
-the current source on aarch64 macOS with Kani 0.68.0, run with `-j 2`,
-including the database-grammar fast-path harnesses described under Direct
-Kani harnesses.
+the then-current source on aarch64 macOS with Kani 0.68.0, run with `-j 2`,
+including the then-separate database-grammar harnesses. That historical run
+does not establish verification of the present single-grammar implementation.
 
 ### MySQL context-free server evaluation
 

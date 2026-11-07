@@ -613,7 +613,11 @@ fn directed_overflow<T: S>() {
             out(T::div_rounded(big, half, Rounding::TowardNegative).unwrap()),
             if neg { Out::Inf(true) } else { out(T::max()) }
         );
-        let text = format!("{}1e{}", if neg { "-" } else { "" }, hi + p as i32);
+        let text = format!(
+            "{}1{}",
+            if neg { "-" } else { "" },
+            "0".repeat((hi + p as i32) as usize)
+        );
         assert_eq!(T::parse(&text), Err(Error::Overflow));
         assert_eq!(
             out(T::parse_rounded(&text, Rounding::TowardPositive).unwrap()),
@@ -635,7 +639,7 @@ fn directed_overflow_gives_the_ieee_infinity_or_largest_finite_value() {
 
 #[test]
 fn narrowing_overflow_and_specials() {
-    let wide = Decimal128::parse("1e400").unwrap();
+    let wide = Decimal128::from_coefficient_and_exponent(1, 400).unwrap();
     assert_eq!(Decimal64::try_from(wide), Err(Error::Overflow));
     assert_eq!(
         Decimal64::from_d128_rounded(wide, Rounding::TowardPositive),

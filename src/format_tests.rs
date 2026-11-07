@@ -406,7 +406,7 @@ fn format_writer_errors_propagate_on_direct_and_padded_paths() {
             Format::D128 => reject!(d128(v)),
         }
     }
-    let v = crate::Decimal128::parse("-1e-6176").unwrap();
+    let v = crate::Decimal128::from_coefficient_and_exponent(-1, -6176).unwrap();
     let mut stack = Stack::new();
     write!(stack, "{v:+06180}").unwrap_err();
     assert!(stack.used <= 6179);
@@ -443,6 +443,12 @@ fn decimal32_exhaustive_format_parse_round_trip() {
     let started = Instant::now();
     let mut text = Stack::new();
     for bits in 0..1_u64 << 32 {
+        if bits & 0x00ff_ffff == 0 {
+            std::eprintln!(
+                "Decimal32 format/parse progress={bits}/4294967296 elapsed={:?}",
+                started.elapsed()
+            );
+        }
         match (
             Decimal32::from_bits(bits as u32),
             refbid::classify(u128::from(bits), Format::D32),
@@ -495,7 +501,7 @@ fn decimal32_exhaustive_format_parse_round_trip() {
         }
     }
     std::eprintln!(
-        "Decimal32 exhaustive plain+stripped format/parse: {:?}",
+        "Decimal32 exhaustive plain+stripped format/parse: 4294967296/4294967296 {:?}",
         started.elapsed()
     );
 }

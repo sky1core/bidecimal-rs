@@ -486,8 +486,6 @@ fn decimal128_construction_paths_store_small_form() {
     let strings = [
         "0",
         "-0",
-        "0E-6176",
-        "-0E+6111",
         "1",
         "-1.5",
         "0.05",
@@ -496,15 +494,34 @@ fn decimal128_construction_paths_store_small_form() {
         "5192296858534827628530496329220095",
         "5192296858534827628530496329220096",
         "9999999999999999999999999999999999",
-        "-9999999999999999999999999999999999E+6111",
-        "1E-6176",
-        "1E-6177",
         "99999999999999999999999999999999995",
         "10384593717069655257060992658440191",
         "10384593717069655257060992658440192",
-        "1E+6145",
     ];
     let mut values = std::vec![Decimal128::ZERO, Decimal128::MAX, Decimal128::MIN];
+    for (coefficient, exponent, negative_zero) in [
+        (0, -6176, false),
+        (0, 6111, true),
+        (-9999999999999999999999999999999999_i128, 6111, false),
+        (1, -6176, false),
+        (1, -6177, false),
+        (1, 6145, false),
+    ] {
+        check.check(
+            Decimal128::from_coefficient_and_exponent(coefficient, exponent)
+                .map(|value| if negative_zero { -value } else { value }),
+            "constructor",
+        );
+        for dir in DIRS {
+            values.extend(
+                check.check(
+                    Decimal128::from_coefficient_and_exponent_rounded(coefficient, exponent, dir)
+                        .map(|value| if negative_zero { -value } else { value }),
+                    "constructor_rounded",
+                ),
+            );
+        }
+    }
     for (value, path) in values.iter().zip(["ZERO", "MAX", "MIN"]) {
         assert_small_form_128(*value, path);
     }
@@ -620,7 +637,8 @@ fn decimal128_construction_paths_store_small_form() {
         }
     }
 
-    check.assert_every_path_ok(2 + 3 + 4 + 2 + 4 * 9 + 2 * 9 + 1 + 3 + 2);
+    // Include exact and rounded coefficient/exponent construction paths.
+    check.assert_every_path_ok(2 + 3 + 4 + 2 + 4 * 9 + 2 * 9 + 1 + 3 + 2 + 2);
 }
 
 #[test]

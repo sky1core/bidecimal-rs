@@ -284,8 +284,13 @@ fn binary_oracle_rounding_cohorts_and_range() {
 fn float_fixtures_are_exact_and_binary_rounding_is_direct() {
     macro_rules! width {
         ($ty:ty, $width:literal) => {
-            for (_, text) in paths::float_inputs($width) {
-                let value = <$ty>::parse(text).unwrap();
+            for (fixture, text) in paths::float_inputs($width) {
+                let text = text.as_str();
+                let value = if fixture == "huge" {
+                    <$ty>::from_coefficient_and_exponent(1, 28).unwrap()
+                } else {
+                    <$ty>::parse(text).unwrap()
+                };
                 assert_eq!(value.exact(), Some(Exact::parse(text)));
                 assert_eq!(value.to_f64().to_bits(), support::decimal_binary(text, 64));
                 assert_eq!(
@@ -377,33 +382,26 @@ fn decimal_binary_oracle_midpoints_neighbors_and_range() {
 
 #[test]
 fn decimal_to_binary_product_zero_subnormal_and_overflow_boundaries() {
-    for (width, text, expected) in [
-        (32, "0", 0_u64),
-        (64, "0", 0),
-        (32, "7.00649232162408535461864791644958e-46", 0),
-        (32, "7.00649232162408535461864791644959e-46", 1),
-        (32, "1.401298464324817070923729583289916e-45", 1),
-        (32, "3.402823567797336616375393954581425e38", 0x7f7fffff),
-        (32, "3.402823567797336616375393954581426e38", 0x7f800000),
-        (64, "2.470328229206232720882843964341106e-324", 0),
-        (64, "2.470328229206232720882843964341107e-324", 1),
-        (64, "4.940656458412465441765687928682214e-324", 1),
-        (
-            64,
-            "1.797693134862315807937289714053034e308",
-            0x7fefffffffffffff,
-        ),
-        (
-            64,
-            "1.797693134862315807937289714053035e308",
-            0x7ff0000000000000,
-        ),
+    for (width, coefficient, exponent, expected) in [
+        (32, 0, 0, 0_u64),
+        (64, 0, 0, 0),
+        (32, 700649232162408535461864791644958, -78, 0),
+        (32, 700649232162408535461864791644959, -78, 1),
+        (32, 1401298464324817070923729583289916, -78, 1),
+        (32, 3402823567797336616375393954581425, 5, 0x7f7fffff),
+        (32, 3402823567797336616375393954581426, 5, 0x7f800000),
+        (64, 2470328229206232720882843964341106, -357, 0),
+        (64, 2470328229206232720882843964341107, -357, 1),
+        (64, 4940656458412465441765687928682214, -357, 1),
+        (64, 1797693134862315807937289714053034, 275, 0x7fefffffffffffff),
+        (64, 1797693134862315807937289714053035, 275, 0x7ff0000000000000),
     ] {
         for negative in [false, true] {
-            let text = format!("{}{text}", if negative { "-" } else { "" });
+            let text = format!("{}{coefficient}e{exponent}", if negative { "-" } else { "" });
             let expected = expected | (u64::from(negative) << (width - 1));
             assert_eq!(support::decimal_binary(&text, width), expected);
-            let value = bidecimal::Decimal128::parse(&text).unwrap();
+            let value = bidecimal::Decimal128::from_coefficient_and_exponent(coefficient, exponent).unwrap();
+            let value = if negative { -value } else { value };
             let actual = if width == 32 {
                 value.to_f32().to_bits() as u64
             } else {

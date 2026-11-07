@@ -84,7 +84,10 @@ mod tests {
                 assert_eq!(std::format!("{collector:?}"), before);
                 assert!(
                     collector
-                        .push_bound_value::<Numeric, _>(&<$d>::parse("1e-31").unwrap(), &mut ())
+                        .push_bound_value::<Numeric, _>(
+                            &<$d>::from_coefficient_and_exponent(1, -31).unwrap(),
+                            &mut ()
+                        )
                         .is_err()
                 );
                 assert_eq!(std::format!("{collector:?}"), before);
@@ -160,8 +163,13 @@ mod tests {
     fn diesel_mysql_single_write_matches_chunked_payload_and_errors_all_widths() {
         macro_rules! check {
             ($d:ty, $i:ty, $precision:expr, $long:literal) => {{
-                for input in ["1.50", $long, "100e-32", "-0.000", "-1e64", "-1e-30"] {
+                for input in ["1.50", $long, "-0.000"] {
                     assert_same_collector(<$d>::parse(input).unwrap());
+                }
+                for (coefficient, exponent) in [(100, -32), (-1, 64), (-1, -30)] {
+                    assert_same_collector(
+                        <$d>::from_coefficient_and_exponent(coefficient, exponent).unwrap(),
+                    );
                 }
                 for coefficient in [0_u128, 1, 150, 10_u128.pow($precision) - 1] {
                     for exponent in [-31, -30, -2, -1, 0, 1, 65 - $precision as i32, 64, 65] {
@@ -221,7 +229,11 @@ fn diesel_fast_fit_differential() {
                 for exp in exponents {
                     for sign in ["", "-"] {
                         let text = std::format!("{sign}{coeff}e{exp}");
-                        let Ok(value) = <$ty>::parse(&text) else {
+                        let magnitude: i128 = coeff.parse().unwrap();
+                        let wide =
+                            Decimal128::from_coefficient_and_exponent(magnitude, exp).unwrap();
+                        let wide = if sign == "-" { -wide } else { wide };
+                        let Some(value) = <$ty>::try_from(wide).ok() else {
                             continue;
                         };
                         let a = MysqlText::<true>::new(value);

@@ -56,16 +56,17 @@ macro_rules! serde_width_tests {
             pub(super) fn samples() -> std::vec::Vec<$decimal> {
                 let mut values = std::vec![];
                 for text in [
-                    "1.50", "1.5", "-1.50", "-1.5", "0", "-0", "0.00", "-0.00", "1E+5",
-                    "-1E+5", "inf", "-inf", "NaN", "-NaN",
+                    "1.50", "1.5", "-1.50", "-1.5", "0", "-0", "0.00", "-0.00", "inf", "-inf", "NaN", "-NaN",
                 ] {
                     values.push(<$decimal>::parse(text).unwrap());
                 }
                 values.extend([
+                    <$decimal>::from_coefficient_and_exponent(1, 5).unwrap(),
+                    <$decimal>::from_coefficient_and_exponent(-1, 5).unwrap(),
                     <$decimal>::MAX,
                     <$decimal>::MIN,
-                    <$decimal>::parse(&format!("1e{}", <$decimal>::MIN_EXP)).unwrap(),
-                    <$decimal>::parse(&format!("-0e{}", <$decimal>::MAX_EXP)).unwrap(),
+                    <$decimal>::from_coefficient_and_exponent(1, <$decimal>::MIN_EXP).unwrap(),
+                    -<$decimal>::from_coefficient_and_exponent(0, <$decimal>::MAX_EXP).unwrap(),
                 ]);
                 for negative in [false, true] {
                     for signaling in [false, true] {
@@ -98,13 +99,13 @@ macro_rules! serde_width_tests {
                 for text in ["1.50", "1.5", "-1.50", "-1.5", "0", "-0", "0.00", "-0.00", "inf", "-inf"] {
                     check_readable(<$decimal>::parse(text).unwrap(), text);
                 }
-                check_readable(<$decimal>::parse("1E+5").unwrap(), "100000");
-                check_readable(<$decimal>::parse("-1E+5").unwrap(), "-100000");
+                check_readable(<$decimal>::from_coefficient_and_exponent(1, 5).unwrap(), "100000");
+                check_readable(<$decimal>::from_coefficient_and_exponent(-1, 5).unwrap(), "-100000");
                 for value in samples().into_iter().filter(|value| value.is_nan()) {
                     check_readable(value, "NaN");
                 }
                 assert_ne!(
-                    <$decimal>::parse("1E+5").unwrap().to_bits(),
+                    <$decimal>::from_coefficient_and_exponent(1, 5).unwrap().to_bits(),
                     <$decimal>::parse("100000").unwrap().to_bits()
                 );
             }

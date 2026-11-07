@@ -528,48 +528,46 @@ fn paths(c: &mut Criterion) {
 
 const FLOAT_COUNT: usize = 256;
 
-pub fn float_inputs(width: u32) -> Vec<(&'static str, &'static str)> {
+pub fn float_inputs(width: u32) -> Vec<(&'static str, String)> {
     let mut inputs = vec![
-        ("short01", "0.1"),
-        ("short15", "1.5"),
-        ("short12345", "123.45"),
-        ("integer", "42"),
-        ("tiny", "1e-28"),
-        ("huge", "1e28"),
-        ("extended32", "1e11"),
-        ("large_exp", "1e80"),
-        ("subnormal32", "1e-45"),
+        ("short01", "0.1".to_owned()),
+        ("short15", "1.5".to_owned()),
+        ("short12345", "123.45".to_owned()),
+        ("integer", "42".to_owned()),
+        ("tiny", format!("0.{}1", "0".repeat(27))),
+        ("huge", format!("1{}", "0".repeat(28))),
+        ("extended32", format!("1{}", "0".repeat(11))),
+        ("large_exp", format!("1{}", "0".repeat(80))),
+        ("subnormal32", format!("0.{}1", "0".repeat(44))),
     ];
     if width >= 64 {
         inputs.extend([
-            ("digits15", "1.23456789012345"),
-            ("digits16", "1.234567890123456"),
-            ("subnormal64", "5e-324"),
-            ("subnormal64_max", "2.225073858507201e-308"),
+            ("digits15", "1.23456789012345".to_owned()),
+            ("digits16", "1.234567890123456".to_owned()),
+            ("subnormal64", format!("0.{}5", "0".repeat(323))),
+            ("subnormal64_max", format!("0.{}2225073858507201", "0".repeat(307))),
         ]);
     }
     if width == 128 {
         inputs.extend([
-            ("digits17", "1.2345678901234567"),
-            ("digits18", "1.23456789012345678"),
-            ("digits19", "1.234567890123456789"),
-            ("digits34", "1.234567890123456789012345678901234"),
-            ("f32_double_round", "1.000000059604644775390625001"),
-            ("f32_midpoint", "1.000000059604644775390625000000001"),
+            ("digits17", "1.2345678901234567".to_owned()),
+            ("digits18", "1.23456789012345678".to_owned()),
+            ("digits19", "1.234567890123456789".to_owned()),
+            ("digits34", "1.234567890123456789012345678901234".to_owned()),
+            ("f32_double_round", "1.000000059604644775390625001".to_owned()),
+            ("f32_midpoint", "1.000000059604644775390625000000001".to_owned()),
         ]);
     }
-    inputs.extend(match width {
-        32 => [("range_tiny", "1e-101"), ("range_huge", "9.999999e96")],
-        64 => [
-            ("range_tiny", "1e-398"),
-            ("range_huge", "9.999999999999999e384"),
-        ],
-        128 => [
-            ("range_tiny", "1e-6176"),
-            ("range_huge", "9.999999999999999999999999999999999e6144"),
-        ],
+    let (digits, low, high) = match width {
+        32 => (7, 101, 90),
+        64 => (16, 398, 369),
+        128 => (34, 6176, 6111),
         _ => panic!("unsupported decimal width"),
-    });
+    };
+    inputs.extend([
+        ("range_tiny", format!("0.{}1", "0".repeat(low - 1))),
+        ("range_huge", format!("{}{}", "9".repeat(digits), "0".repeat(high))),
+    ]);
     inputs
 }
 
@@ -619,7 +617,14 @@ fn float_paths(c: &mut Criterion) {
     macro_rules! width {
         ($ty:ty, $width:literal) => {{
             for (fixture, text) in float_inputs($width) {
-                let value = <$ty>::parse(text).unwrap();
+                let text = text.as_str();
+                // Preserve the positive-exponent cohorts from the original fixtures.
+                let value = match fixture {
+                    "huge" => <$ty>::from_coefficient_and_exponent(1, 28).unwrap(),
+                    "extended32" => <$ty>::from_coefficient_and_exponent(1, 11).unwrap(),
+                    "large_exp" => <$ty>::from_coefficient_and_exponent(1, 80).unwrap(),
+                    _ => <$ty>::parse(text).unwrap(),
+                };
                 assert_eq!(value.exact(), Some(Exact::parse(text)));
                 let base = Decimal::from_str(text).ok().filter(|v| v.exact() == value.exact());
                 println!("FLOAT_INPUT width={} fixture={fixture} decimal={text}", $width);
@@ -703,6 +708,8 @@ const MIXED_SEED: u64 = 0x1319_8a2e_0370_7344;
 
 // FLOAT_COUNT independently drawn signed decimals, possibly repeated: `digits`
 // random significant digits and an adjusted exponent drawn from `adjusted`.
+// The scientific text is only for the independent oracle; bidecimal values
+// use the coefficient/exponent constructor to retain every generated cohort.
 fn mixed_decimals(
     rng: &mut SplitMix64,
     digits: std::ops::RangeInclusive<u32>,
@@ -780,7 +787,16 @@ fn mixed_float_paths(c: &mut Criterion) {
                 let inputs = mixed_decimals(&mut rng, digits, adjusted);
                 let values: Vec<$ty> = inputs
                     .iter()
-                    .map(|(_, _, text)| <$ty>::parse(text).unwrap())
+                    .map(|(coeff, exp, _)| {
+                        let value = <$ty>::from_coefficient_and_exponent(
+                            (*coeff).try_into().unwrap(),
+                            *exp,
+                        )
+                        .unwrap();
+                        let (stored_coeff, stored_exp) = value.to_coefficient_and_exponent().unwrap();
+                        assert_eq!((stored_coeff as i128, stored_exp), (*coeff, *exp));
+                        value
+                    })
                     .collect();
                 macro_rules! to_binary {
                     ($binary_width:literal, $method:ident) => {{
